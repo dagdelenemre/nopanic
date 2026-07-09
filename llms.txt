@@ -1,0 +1,122 @@
+# nopanic
+
+> Zero-dependency Python resilience toolkit: retry, circuit breaker, timeout, rate limit, bulkhead, fallback and hedged requests as composable decorators. One API, identical for sync (`def`) and async (`async def`) functions. Python 3.10+, fully typed (`py.typed`), MIT license.
+
+Install: `pip install nopanic`
+
+Imports: `from nopanic import retry, circuit_breaker, CircuitBreaker, timeout, rate_limit, bulkhead, fallback, hedge, compose, backoff, RetryAttempt, ResilienceError, CircuitOpen, BulkheadFull, RateLimited, Policy`
+
+## Rules that apply to every policy
+
+- A policy instance IS a decorator: `@retry(...)`, `@timeout(2.0)`. Works on both `def` and `async def`; the wrapper flavour is chosen at decoration time.
+- Policies never wrap user exceptions. On final failure the ORIGINAL exception is re-raised unchanged. Policies raise only their own signals: `CircuitOpen`, `BulkheadFull`, `RateLimited` (all subclass `ResilienceError`) and the builtin `TimeoutError`.
+- Stateful policies (`CircuitBreaker`, `bulkhead`, `rate_limit`) hold shared state. Create ONE instance per protected dependency and decorate every call site with that same instance. Never create a fresh instance per call.
+- Every `on=` parameter accepts: an exception type, a tuple of types, or a predicate `Callable[[BaseException], bool]`.
+- All numeric parameters reject NaN, infinity and bool at construction time (ValueError/TypeError).
+- Only `Exception` subclasses are handled; `KeyboardInterrupt` and `asyncio.CancelledError` always propagate.
+
+## API reference
+
+### retry(attempts=3, on=Exception, backoff=None, *, giveup=None, before_sleep=None)
+
+Re-runs the call when it raises an exception matching `on`. `attempts` is the TOTAL number of tries including the first. `backoff` is a plain number (fixed seconds) or a strategy from `nopanic.backoff`; default is `backoff.full_jitter(base=0.1, factor=2.0, cap=30.0)`. `giveup(exc) -> bool` stops retrying even for matching exceptions (use it for permanent errors, e.g. HTTP 4xx except 429). `before_sleep(attempt: RetryAttempt)` runs before each wait; `RetryAttempt` fields: `attempt` (int, 1-based), `exception`, `delay` (seconds). On exhaustion the last exception is re-raised as-is; there is no RetryError wrapper.
+
+### nopanic.backoff strategies
+
+- `fixed(delay=1.0)`
+- `exponential(base=0.1, factor=2.0, cap=30.0)` (deterministic)
+- `full_jitter(base=0.1, factor=2.0, cap=30.0)` (recommended against shared services; AWS-style)
+- `decorrelated_jitter(base=0.1, cap=30.0)`
+- Any iterable of floats also works; when it runs out, retrying stops and the original error is raised.
+
+### circuit_breaker(*, failure_threshold=0.5, min_calls=5, window=30.0, reset_timeout=30.0, half_open_max_calls=1, on=Exception, name=None, on_state_change=None, clock=time.monotonic)
+
+Class name `CircuitBreaker`; `circuit_breaker` is an alias. Failure-rate breaker over a sliding time window. States: closed -> open when the window holds >= `min_calls` outcomes AND failure rate >= `failure_threshold`; while open every call raises `CircuitOpen(name, retry_after)` without touching the dependency; after `reset_timeout` seconds it goes half-open and admits `half_open_max_calls` probe calls (all succeed -> closed and window cleared; any failure -> open again). Exceptions NOT matching `on` are propagated without being recorded at all. Introspection: `.state` returns "closed" | "open" | "half_open"; `.reset()` forces closed. `on_state_change(breaker, old, new)` hook errors are logged to the `nopanic.breaker` logger and suppressed.
+
+### timeout(seconds)
+
+Raises builtin `TimeoutError` when the call exceeds `seconds`. Async: clean cancellation via the event loop. Sync: the call runs on a daemon worker thread which is ABANDONED on timeout (Python cannot kill threads; the work may keep running in the background). Prefer the async path or the callee's native timeout when abandonment matters.
+
+### rate_limit(rate, per=1.0, *, burst=None, max_wait=None, clock=time.monotonic)
+
+Token-bucket client-side limiter: `rate` calls per `per` seconds; `burst` is the bucket capacity (default `rate`, must be >= 1). Default behaviour WAITS for a token (roughly FIFO). If `max_wait` is set, a call that would wait longer raises `RateLimited` instead; `max_wait=0` means never wait.
+
+### bulkhead(max_concurrent, *, max_wait=None, name=None)
+
+Caps concurrent in-flight calls. `max_wait=None` waits for a slot indefinitely; `0` fails fast; `N` waits up to N seconds; on expiry raises `BulkheadFull`. Async callers share one semaphore per event loop; sync callers share a thread semaphore.
+
+### fallback(handler, *, on=Exception)
+
+When the call raises a matching exception: if `handler` is callable it is invoked with the exception and its result is returned (async handlers are awaited when the wrapped function is async); otherwise `handler` itself is returned as the value. Non-matching exceptions propagate. Place it OUTERMOST in a stack.
+
+### hedge(*, delay, max_hedges=1)  [async only]
+
+If the call has not finished after `delay` seconds, launches a duplicate call; first success wins, losers are cancelled AND awaited (no orphan tasks). If an attempt fails while hedges remain, the next hedge launches immediately. Only for idempotent operations. Applying it to a sync function raises TypeError at call time.
+
+### compose(*policies)
+
+Returns a single decorator; the FIRST argument is the OUTERMOST policy. `compose(a, b, c)` == stacking `@a` over `@b` over `@c`.
+
+## Composition semantics
+
+- Plain decorator stacking is equivalent to `compose`; the decorator closest to the function runs innermost.
+- `timeout` inside `retry` = a fresh time budget per attempt (the usual intent).
+- `retry` outside a breaker: `CircuitOpen` is NOT retried unless you add it to retry's `on`. Add it if you want attempts to ride out a short open window; omit it to fail fast.
+- Recommended production order, outermost to innermost: `fallback -> retry -> circuit_breaker -> rate_limit/bulkhead -> timeout`.
+
+## Recipes
+
+HTTP with requests (retry connection errors, timeouts, 429 and 5xx; never other 4xx):
+
+```python
+import requests
+from nopanic import retry, backoff
+
+def _retriable(e):
+    if isinstance(e, (requests.ConnectionError, requests.Timeout)):
+        return True
+    return (isinstance(e, requests.HTTPError) and e.response is not None
+            and (e.response.status_code == 429 or e.response.status_code >= 500))
+
+@retry(attempts=4, on=_retriable, backoff=backoff.full_jitter(base=0.2, cap=10.0))
+def get_json(url):
+    r = requests.get(url, timeout=10)   # always set a transport timeout too
+    r.raise_for_status()
+    return r.json()
+```
+
+Async LLM call, full stack:
+
+```python
+from nopanic import compose, fallback, retry, circuit_breaker, rate_limit, timeout, backoff, CircuitOpen
+
+llm_breaker = circuit_breaker(failure_threshold=0.5, min_calls=8, reset_timeout=20.0, name="llm")
+llm_quota = rate_limit(60, per=60.0)  # one instance, shared by all call sites
+
+resilient = compose(
+    fallback(lambda e: "temporarily unavailable", on=(ConnectionError, CircuitOpen, TimeoutError)),
+    retry(attempts=3, on=(ConnectionError, TimeoutError), backoff=backoff.full_jitter(0.2)),
+    llm_breaker,
+    llm_quota,
+    timeout(30.0),
+)
+
+@resilient
+async def ask(prompt: str) -> str:
+    ...
+```
+
+## Gotchas
+
+- Do not blindly retry non-idempotent operations (payments, inserts); use `giveup` or a narrow `on` filter.
+- Do not retry permanent client errors (4xx other than 429); see the `_retriable` recipe above.
+- `hedge` duplicates in-flight work: only for idempotent, read-style calls.
+- Sync `timeout` does not stop the underlying work; the worker thread is abandoned.
+- A waiting `rate_limit`/`bulkhead` queues callers without bound by default; set `max_wait` when call volume is untrusted.
+- Hook errors (`before_sleep`, `on_state_change`) never break the guarded call; they are logged to the `nopanic.retry` / `nopanic.breaker` loggers.
+- Test deterministically by injecting `clock=` into `CircuitBreaker` / `rate_limit` (any `() -> float` callable).
+
+## Files
+
+- Source: https://github.com/dagdelenemre/nopanic (src/nopanic/, one module per policy)
+- Full docs: README.md; security policy: SECURITY.md; changelog: CHANGELOG.md

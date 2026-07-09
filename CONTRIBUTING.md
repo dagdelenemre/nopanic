@@ -10,7 +10,7 @@ pip install -e .[dev]
 
 ## Before you open a PR
 
-All of these must pass (CI runs them on 3 OSes × Python 3.10–3.14):
+All of these must pass (CI runs them on 3 OSes x Python 3.10-3.14):
 
 ```
 ruff check .
@@ -28,12 +28,14 @@ pytest -q
 - **No wrapper exceptions.** User exceptions are re-raised unchanged; policies
   add only their own precise signals (`CircuitOpen`, `BulkheadFull`,
   `RateLimited`).
-- **No `assert` in `src/`** — it disappears under `python -O`.
+- **No `assert` in `src/`**: it disappears under `python -O`.
 - **Testable time.** Anything time-dependent takes an injectable `clock`;
   tests must not `sleep()` for correctness (tiny sleeps for real concurrency
   are acceptable).
 - New behaviour needs tests; changed behaviour needs a CHANGELOG entry.
+- If the public API changes, update `llms.txt` in the same PR so AI coding
+  agents see an accurate surface.
 
 ## Reporting security issues
 
-See [SECURITY.md](SECURITY.md) — never as public issues.
+See [SECURITY.md](SECURITY.md), never public issues.

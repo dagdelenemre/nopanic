@@ -20,7 +20,7 @@ disclosure plan within 30 days.
 
 `nopanic` is deliberately small-surface:
 
-- **Zero runtime dependencies** — nothing to supply-chain-attack transitively;
+- **Zero runtime dependencies**: nothing to supply-chain-attack transitively;
   `pip-audit` runs in CI for the dev toolchain.
 - **No I/O, no network, no filesystem access, no `eval`/`exec`, no `pickle`,
   no subprocesses.** The library only wraps callables you give it.
@@ -40,8 +40,8 @@ disclosure plan within 30 days.
 
 Operational cautions (by design, documented rather than hidden):
 
-- The **sync `timeout`** abandons its worker thread on expiry — Python cannot
-  kill threads. The abandoned call keeps running until it returns; prefer the
+- The **sync `timeout`** abandons its worker thread on expiry, because Python
+  cannot kill threads. The abandoned call keeps running until it returns; prefer the
   async path or the callee's native timeout when that matters.
 - A **waiting `rate_limit` or `bulkhead`** can queue callers without bound by
   default. If untrusted parties control your call volume, set `max_wait` so

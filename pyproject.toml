@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nopanic"
 version = "0.1.0"
-description = "Unified resilience toolkit for Python: retries, circuit breakers, timeouts, rate limits, bulkheads and request hedging — zero dependencies, sync + async, one decorator API."
+description = "Unified resilience toolkit for Python: retries, circuit breakers, timeouts, rate limits, bulkheads and request hedging. Zero dependencies, sync + async, one decorator API."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -59,7 +59,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "S"]
-# S311: backoff jitter uses the stdlib PRNG on purpose — it shapes load and
+# S311: backoff jitter uses the stdlib PRNG on purpose; it shapes load and
 # is not a security boundary (see SECURITY.md).
 ignore = ["S311"]
 
