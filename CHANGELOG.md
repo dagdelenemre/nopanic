@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 (2026-07-10)
+
+- Packaging fix: the 0.1.0 source distribution accidentally included local
+  scratch files (test experiments and a local tool config; no secrets, and
+  installed wheels were never affected). The sdist now uses an explicit
+  allowlist. The 0.1.0 release has been removed from PyPI.
+
 ## 0.1.0 (2026-07-09)
 
 Initial release.

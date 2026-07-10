@@ -11,3 +11,5 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+.claude/
+temporarytest/
