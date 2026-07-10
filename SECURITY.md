@@ -11,7 +11,7 @@ Please **do not open a public issue** for suspected vulnerabilities. Instead:
 
 - use GitHub's private vulnerability reporting ("Report a vulnerability" under
   the Security tab), or
-- email <kadiremredagdelen@gmail.com> with a description and reproduction.
+- email <dagdelen.cyber@gmail.com> with a description and reproduction.
 
 You will get an acknowledgement within 72 hours and a fix or a coordinated
 disclosure plan within 30 days.
