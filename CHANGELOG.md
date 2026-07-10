@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 (2026-07-10)
+
+- Metadata-only release: corrected the author name. No code changes.
+
 ## 0.1.2 (2026-07-10)
 
 - Metadata-only release: project contact email updated to

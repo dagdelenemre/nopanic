@@ -30,7 +30,7 @@ from .ratelimit import rate_limit
 from .retry import RetryAttempt, retry
 from .timeout import timeout
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "BulkheadFull",
