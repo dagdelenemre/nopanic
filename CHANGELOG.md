@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 (2026-07-10)
+
+- Metadata-only release: project contact email updated to
+  dagdelen.cyber@gmail.com. No code changes.
+
 ## 0.1.1 (2026-07-10)
 
 - Packaging fix: the 0.1.0 source distribution accidentally included local
