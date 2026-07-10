@@ -149,6 +149,27 @@ async def ask(prompt: str) -> str: ...
 
 Reading inside-out: each attempt gets 30s -> outcomes feed the breaker -> transient failures retry with jitter -> anything left becomes a graceful answer.
 
+## Recipe: retrying HTTP the right way
+
+Retry transport errors, timeouts, 429 and 5xx; never retry other 4xx (they are permanent, retrying them is just noise):
+
+```python
+import requests
+from nopanic import retry, backoff
+
+def _retriable(e):
+    if isinstance(e, (requests.ConnectionError, requests.Timeout)):
+        return True
+    return (isinstance(e, requests.HTTPError) and e.response is not None
+            and (e.response.status_code == 429 or e.response.status_code >= 500))
+
+@retry(attempts=4, on=_retriable, backoff=backoff.full_jitter(base=0.2, cap=10.0))
+def get_json(url):
+    r = requests.get(url, timeout=10)   # always set a transport timeout too
+    r.raise_for_status()
+    return r.json()
+```
+
 ## Design principles
 
 - **Zero dependencies.** A resilience library must not be a reliability risk itself.
