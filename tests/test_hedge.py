@@ -16,7 +16,7 @@ def test_hedge_beats_slow_first_attempt():
         call_no = len(calls) + 1
         calls.append(call_no)
         if call_no == 1:
-            await asyncio.sleep(2.0)  # pathologically slow first attempt
+            await asyncio.sleep(6.0)  # pathologically slow first attempt
         return f"result-{call_no}"
 
     start = time.monotonic()
@@ -24,14 +24,14 @@ def test_hedge_beats_slow_first_attempt():
     elapsed = time.monotonic() - start
 
     assert result == "result-2"
-    assert elapsed < 1.5  # returned well before the slow attempt would finish
+    assert elapsed < 5.0  # returned well before the slow attempt would finish
     assert len(calls) == 2
 
 
 def test_fast_first_attempt_never_hedges():
     calls = []
 
-    @hedge(delay=0.5)
+    @hedge(delay=2.0)  # generous: a stalled CI runner must not fire the hedge
     async def quick():
         calls.append(1)
         return "fast"
@@ -52,7 +52,7 @@ def test_failed_attempt_hedges_immediately():
 
     start = time.monotonic()
     assert asyncio.run(flaky()) == "recovered"
-    assert time.monotonic() - start < 5.0
+    assert time.monotonic() - start < 8.0  # well under the 10s hedge delay
     assert len(calls) == 2
 
 

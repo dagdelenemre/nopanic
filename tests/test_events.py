@@ -98,19 +98,24 @@ def test_breaker_emits_state_change_and_rejected(seen, clock):
 def test_bulkhead_emits_rejected(seen):
     bh = bulkhead(1, max_wait=0)
 
-    @bh
-    async def slow():
-        await asyncio.sleep(0.2)
-
-    @bh
-    async def rejected():
-        return "no"
-
     async def scenario():
-        task = asyncio.ensure_future(slow())
-        await asyncio.sleep(0.01)
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        @bh
+        async def occupy():
+            entered.set()
+            await release.wait()
+
+        @bh
+        async def rejected():
+            return "no"
+
+        task = asyncio.ensure_future(occupy())
+        await entered.wait()
         with pytest.raises(BulkheadFull):
             await rejected()
+        release.set()
         await task
 
     asyncio.run(scenario())

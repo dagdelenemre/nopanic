@@ -86,20 +86,25 @@ def test_async_limits_concurrency():
 def test_async_fail_fast():
     bh = bulkhead(1, max_wait=0)
 
-    @bh
-    async def slow():
-        await asyncio.sleep(0.2)
-        return "slow done"
-
-    @bh
-    async def rejected():
-        return "nope"
-
     async def scenario():
-        task = asyncio.ensure_future(slow())
-        await asyncio.sleep(0.01)  # let slow() claim the slot
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        @bh
+        async def occupy():
+            entered.set()
+            await release.wait()
+            return "slow done"
+
+        @bh
+        async def rejected():
+            return "nope"
+
+        task = asyncio.ensure_future(occupy())
+        await entered.wait()  # the slot is provably claimed, no timing guess
         with pytest.raises(BulkheadFull):
             await rejected()
+        release.set()
         assert await task == "slow done"
         assert await rejected() == "nope"  # slot free again
 
@@ -109,19 +114,24 @@ def test_async_fail_fast():
 def test_async_bounded_wait_expires():
     bh = bulkhead(1, max_wait=0.02)
 
-    @bh
-    async def slow():
-        await asyncio.sleep(0.3)
-
-    @bh
-    async def waiter():
-        return "in"
-
     async def scenario():
-        task = asyncio.ensure_future(slow())
-        await asyncio.sleep(0.01)
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        @bh
+        async def occupy():
+            entered.set()
+            await release.wait()
+
+        @bh
+        async def waiter():
+            return "in"
+
+        task = asyncio.ensure_future(occupy())
+        await entered.wait()  # held until we say otherwise; waiter must expire
         with pytest.raises(BulkheadFull):
             await waiter()
+        release.set()
         await task
 
     asyncio.run(scenario())

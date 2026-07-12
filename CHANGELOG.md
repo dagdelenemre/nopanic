@@ -18,9 +18,12 @@ New capabilities, no breaking changes.
   extra seconds instead of the error. LRU-bounded, custom `key` support.
 - `retry` now honors a numeric `retry_after` attribute on raised exceptions
   (HTTP Retry-After, `CircuitOpen`), raising the wait to at least that
-  long; disable with `honor_retry_after=False`. Server-sent hints are
-  capped (`retry_after_cap`, default 60s) so a hostile server cannot park
-  the client; the same cap exists as `max_block` on `adaptive_rate_limit`.
+  long plus a small safety margin (5% + 50ms: "retry after X" means "not
+  before X", and on Windows `time.sleep` can wake before the monotonic
+  deadline, which would burn attempts against a still-closed window);
+  disable with `honor_retry_after=False`. Server-sent hints are capped
+  (`retry_after_cap`, default 60s) so a hostile server cannot park the
+  client; the same cap exists as `max_block` on `adaptive_rate_limit`.
 - Performance: success paths measured and tuned (retry no longer builds a
   backoff iterator unless a failure happens); `benchmarks/bench.py` added,
   per-policy overhead documented in the README (~0.1 to ~1.3 us/call).

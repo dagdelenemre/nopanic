@@ -18,6 +18,14 @@ __all__ = ["RetryAttempt", "retry"]
 
 _log = logging.getLogger(__name__)
 
+# Safety margin added on top of an honored retry_after hint. "Retry after X"
+# means "not before X": sleeping a little longer is always safe, while racing
+# the deadline exactly is not. On Windows, time.sleep can wake measurably
+# before the monotonic deadline (and sub-quantum sleeps can be no-ops), which
+# would otherwise burn retry attempts against a still-closed window.
+_RETRY_AFTER_MARGIN = 0.05
+_RETRY_AFTER_FACTOR = 1.05
+
 
 @dataclass(frozen=True, slots=True)
 class RetryAttempt:
@@ -51,9 +59,10 @@ class retry(Policy):
             after each failure, before the wait — the natural place to log.
         honor_retry_after: When True (default), an exception carrying a
             numeric ``retry_after`` attribute (seconds) raises the wait to at
-            least that long. Works out of the box with ``CircuitOpen`` and
-            with any exception you build from an HTTP 429's Retry-After
-            header.
+            least that long, plus a small safety margin (5% + 50ms) so the
+            deadline is strictly passed despite OS timer granularity. Works
+            out of the box with ``CircuitOpen`` and with any exception you
+            build from an HTTP 429's Retry-After header.
         retry_after_cap: Upper bound on an honored ``retry_after`` hint. The
             hint comes from the remote side; without a cap a hostile or
             buggy server could park the client for arbitrary time.
@@ -114,8 +123,10 @@ class retry(Policy):
                 isinstance(hint, (int, float))
                 and not isinstance(hint, bool)
                 and math.isfinite(hint)
+                and hint > 0
             ):
-                delay = max(delay, min(float(hint), self.retry_after_cap))
+                padded = float(hint) * _RETRY_AFTER_FACTOR + _RETRY_AFTER_MARGIN
+                delay = max(delay, min(padded, self.retry_after_cap))
         emit("retry.attempt_failed", "retry", attempt=attempt, delay=delay, exception=exc)
         if self.before_sleep is not None:
             try:

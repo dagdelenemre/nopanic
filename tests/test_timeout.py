@@ -19,13 +19,15 @@ def test_fast_sync_call_passes_through():
 def test_slow_sync_call_times_out():
     @timeout(0.05)
     def slow():
-        time.sleep(1.0)
+        time.sleep(5.0)
         return "too late"
 
     start = time.monotonic()
     with pytest.raises(TimeoutError):
         slow()
-    assert time.monotonic() - start < 0.9  # did not wait for the full sleep
+    # Generous bound: proves we did not wait out the 5s sleep while staying
+    # robust on slow, contended CI runners.
+    assert time.monotonic() - start < 4.0
 
 
 def test_sync_exception_is_relayed():

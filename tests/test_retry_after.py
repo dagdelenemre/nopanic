@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from nopanic import CircuitBreaker, CircuitOpen, retry
+from nopanic.retry import _RETRY_AFTER_FACTOR, _RETRY_AFTER_MARGIN
+
+
+def padded(hint):
+    """The wait an honored hint produces: hint plus the safety margin."""
+    return hint * _RETRY_AFTER_FACTOR + _RETRY_AFTER_MARGIN
 
 
 class Throttled(Exception):
@@ -19,20 +27,22 @@ def test_retry_after_raises_the_delay():
         return "ok"
 
     assert flaky() == "ok"
-    assert delays == [0.02]  # backoff said 0, the server hint won
+    # Backoff said 0; the server hint won, padded so the deadline is
+    # strictly passed despite OS timer granularity.
+    assert delays == [pytest.approx(padded(0.02))]
 
 
 def test_backoff_wins_when_larger():
     delays = []
 
-    @retry(attempts=2, on=Throttled, backoff=0.03, before_sleep=lambda a: delays.append(a.delay))
+    @retry(attempts=2, on=Throttled, backoff=0.2, before_sleep=lambda a: delays.append(a.delay))
     def flaky():
         if not delays:
             raise Throttled(0.001)
         return "ok"
 
     assert flaky() == "ok"
-    assert delays == [0.03]
+    assert delays == [0.2]  # 0.2 backoff beats the padded ~0.05 hint
 
 
 def test_honor_retry_after_can_be_disabled():
