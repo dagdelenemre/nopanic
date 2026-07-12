@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._core import Policy, positive_number
+from .events import emit
 
 __all__ = ["hedge"]
 
@@ -59,6 +60,7 @@ class hedge(Policy):
                 )
                 if not done:
                     # Nothing finished within the delay: launch a hedge.
+                    emit("hedge.launched", "hedge", delay=self.delay)
                     tasks.add(asyncio.ensure_future(fn(*args, **kwargs)))
                     hedges_left -= 1
                     continue
@@ -71,6 +73,7 @@ class hedge(Policy):
                 if not tasks:
                     if hedges_left > 0:
                         # Everything so far failed fast; hedge immediately.
+                        emit("hedge.launched", "hedge", delay=0.0)
                         tasks.add(asyncio.ensure_future(fn(*args, **kwargs)))
                         hedges_left -= 1
                     elif last_exc is not None:

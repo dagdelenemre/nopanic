@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._core import Policy, positive_number
+from .events import emit
 
 __all__ = ["timeout"]
 
@@ -48,6 +49,7 @@ class timeout(Policy):
         )
         worker.start()
         if not done.wait(self.seconds):
+            emit("timeout.expired", "timeout", seconds=self.seconds, function=fn.__qualname__)
             raise TimeoutError(
                 f"{fn.__qualname__} did not finish within {self.seconds}s "
                 "(worker thread abandoned, not killed)"
@@ -62,6 +64,7 @@ class timeout(Policy):
         try:
             return await asyncio.wait_for(fn(*args, **kwargs), timeout=self.seconds)
         except asyncio.TimeoutError as exc:  # distinct from TimeoutError on 3.10
+            emit("timeout.expired", "timeout", seconds=self.seconds, function=fn.__qualname__)
             raise TimeoutError(
                 f"{fn.__qualname__} did not finish within {self.seconds}s"
             ) from exc

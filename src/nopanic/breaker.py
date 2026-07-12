@@ -25,6 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._core import ExcFilter, Policy, exc_matches, positive_number
+from .events import emit
 from .exceptions import CircuitOpen
 
 __all__ = ["CircuitBreaker", "circuit_breaker"]
@@ -137,6 +138,8 @@ class CircuitBreaker(Policy):
     # -- internals -----------------------------------------------------------
 
     def _fire(self, events: list[tuple[str, str]]) -> None:
+        for old, new in events:
+            emit("breaker.state_change", "circuit_breaker", self.name, old=old, new=new)
         if self.on_state_change is None:
             return
         for old, new in events:
@@ -171,19 +174,23 @@ class CircuitBreaker(Policy):
 
     def _before_call(self) -> str:
         """Admit or reject the call; returns the state it was admitted under."""
+        reject: CircuitOpen | None = None
+        admitted = _CLOSED
         with self._lock:
             events = self._maybe_half_open()
             if self._state == _OPEN:
                 retry_after = self.reset_timeout - (self._clock() - self._opened_at)
-                raise CircuitOpen(self.name, max(0.0, retry_after))
-            if self._state == _HALF_OPEN:
+                reject = CircuitOpen(self.name, max(0.0, retry_after))
+            elif self._state == _HALF_OPEN:
                 if self._half_open_inflight >= self.half_open_max_calls:
-                    raise CircuitOpen(self.name, 0.0)
-                self._half_open_inflight += 1
-                admitted = _HALF_OPEN
-            else:
-                admitted = _CLOSED
+                    reject = CircuitOpen(self.name, 0.0)
+                else:
+                    self._half_open_inflight += 1
+                    admitted = _HALF_OPEN
         self._fire(events)
+        if reject is not None:
+            emit("breaker.rejected", "circuit_breaker", self.name, retry_after=reject.retry_after)
+            raise reject
         return admitted
 
     def _on_success(self, admitted: str) -> None:

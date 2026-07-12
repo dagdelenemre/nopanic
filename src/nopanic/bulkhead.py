@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._core import Policy, positive_number
+from .events import emit
 from .exceptions import BulkheadFull
 
 __all__ = ["bulkhead"]
@@ -53,6 +54,13 @@ class bulkhead(Policy):
         ] = weakref.WeakKeyDictionary()
 
     def _full(self) -> BulkheadFull:
+        emit(
+            "bulkhead.rejected",
+            "bulkhead",
+            self.name,
+            max_concurrent=self.max_concurrent,
+            max_wait=self.max_wait,
+        )
         return BulkheadFull(
             f"bulkhead {self.name!r} is full "
             f"({self.max_concurrent} concurrent calls, max_wait={self.max_wait})"

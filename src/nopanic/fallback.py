@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._core import ExcFilter, Policy, exc_matches
+from .events import emit
 
 __all__ = ["fallback"]
 
@@ -42,6 +43,7 @@ class fallback(Policy):
                 raise TypeError(
                     "async fallback handler cannot be used with a sync function"
                 ) from exc
+            emit("fallback.used", "fallback", exception=exc)
             if callable(self.handler):
                 return self.handler(exc)
             return self.handler
@@ -54,6 +56,7 @@ class fallback(Policy):
         except Exception as exc:
             if not exc_matches(exc, self.on):
                 raise
+            emit("fallback.used", "fallback", exception=exc)
             if callable(self.handler):
                 result = self.handler(exc)
                 if inspect.isawaitable(result):

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ._core import Policy, positive_number
+from .events import emit
 from .exceptions import RateLimited
 
 __all__ = ["rate_limit"]
@@ -78,18 +79,20 @@ class rate_limit(Policy):
             if self._tokens >= 0.0:
                 return 0.0
             wait = -self._tokens / self._refill_per_sec
-            if self.max_wait is not None and wait > self.max_wait:
-                self._tokens += 1.0  # refund the reservation
-                raise RateLimited(
-                    f"rate limit would require waiting {wait:.3f}s (max_wait={self.max_wait})"
-                )
-            return wait
+            if self.max_wait is None or wait <= self.max_wait:
+                return wait
+            self._tokens += 1.0  # refund the reservation
+        emit("ratelimit.rejected", "rate_limit", would_wait=wait, max_wait=self.max_wait)
+        raise RateLimited(
+            f"rate limit would require waiting {wait:.3f}s (max_wait={self.max_wait})"
+        )
 
     def _run_sync(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
         wait = self._reserve()
         if wait > 0:
+            emit("ratelimit.waited", "rate_limit", seconds=wait)
             time.sleep(wait)
         return fn(*args, **kwargs)
 
@@ -98,5 +101,6 @@ class rate_limit(Policy):
     ) -> Any:
         wait = self._reserve()
         if wait > 0:
+            emit("ratelimit.waited", "rate_limit", seconds=wait)
             await asyncio.sleep(wait)
         return await fn(*args, **kwargs)

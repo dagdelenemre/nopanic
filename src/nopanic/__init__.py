@@ -18,11 +18,14 @@ Quick taste::
 
 from __future__ import annotations
 
-from . import backoff
+from . import backoff, events
 from ._core import Policy
+from .adaptive import adaptive_rate_limit, looks_throttled
 from .breaker import CircuitBreaker, circuit_breaker
 from .bulkhead import bulkhead
+from .cache import cache
 from .compose import compose
+from .events import Event, subscribe, unsubscribe
 from .exceptions import BulkheadFull, CircuitOpen, RateLimited, ResilienceError
 from .fallback import fallback
 from .hedge import hedge
@@ -30,24 +33,31 @@ from .ratelimit import rate_limit
 from .retry import RetryAttempt, retry
 from .timeout import timeout
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 __all__ = [
     "BulkheadFull",
     "CircuitBreaker",
     "CircuitOpen",
+    "Event",
     "Policy",
     "RateLimited",
     "ResilienceError",
     "RetryAttempt",
     "__version__",
+    "adaptive_rate_limit",
     "backoff",
     "bulkhead",
+    "cache",
     "circuit_breaker",
     "compose",
+    "events",
     "fallback",
     "hedge",
+    "looks_throttled",
     "rate_limit",
     "retry",
+    "subscribe",
     "timeout",
+    "unsubscribe",
 ]

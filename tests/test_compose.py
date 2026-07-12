@@ -33,7 +33,9 @@ def test_full_production_stack_degrades_gracefully():
 
     stack = compose(
         fallback("cached-answer"),
-        retry(attempts=2, on=(ConnectionError, CircuitOpen), backoff=0),
+        # honor_retry_after=False: otherwise the retry would (correctly!)
+        # sleep out the breaker's 60s open window instead of failing fast.
+        retry(attempts=2, on=(ConnectionError, CircuitOpen), backoff=0, honor_retry_after=False),
         breaker,
     )
 
