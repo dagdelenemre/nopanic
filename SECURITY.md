@@ -37,6 +37,13 @@ disclosure plan within 30 days.
   loggers and suppressed.
 - **Error messages leak nothing** beyond the wrapped function's qualified
   name and the policy's own configuration values.
+- **Remote-controlled delays are capped.** `Retry-After` style hints come
+  from the other side of the wire; `retry` (via ``retry_after_cap``) and
+  `adaptive_rate_limit` (via ``max_block``) bound how long a hostile or
+  buggy server can stall the client (60s by default).
+- **Events stay in-process.** `events.subscribe` listeners receive the
+  raised exception objects; if you forward events to an external sink,
+  scrub payloads yourself.
 
 Operational cautions (by design, documented rather than hidden):
 

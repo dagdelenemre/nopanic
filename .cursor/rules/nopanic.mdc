@@ -1,0 +1,17 @@
+---
+description: nopanic repository conventions and invariants
+alwaysApply: true
+---
+
+Read AGENTS.md at the repository root before making changes: it is the
+source of truth for commands, invariants, style and the release process.
+The compact API reference for using the library is llms.txt.
+
+Never violate: zero runtime dependencies; identical sync/async semantics
+for every policy; user exceptions re-raise unchanged (no wrappers); no
+`assert` under src/; numeric parameters validated via _core.positive_number
+and remote-sourced values capped; hooks/listeners never break guarded
+calls; locks never held while calling user code; hot success paths stay
+allocation-free. Run `ruff check .`, `mypy src` and `pytest -q` before
+declaring any change done; update llms.txt, README.md and CHANGELOG.md
+together with any public API change.

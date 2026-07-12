@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.0 (2026-07-12)
+
+New capabilities, no breaking changes.
+
+- `events`: a process-global observability stream. `events.subscribe()`
+  receives a typed `Event` for everything every policy does (retry attempts,
+  breaker transitions, rejections, throttle adjustments, stale cache
+  serves). Listeners can never break the guarded call.
+- `adaptive_rate_limit`: AIMD client-side rate limiting. Throttle responses
+  (429/503 or anything carrying `retry_after`) cut the rate
+  multiplicatively, successes recover it additively, and an explicit
+  `Retry-After` blocks the bucket for exactly that long. Ships with the
+  `looks_throttled` heuristic covering requests/httpx error shapes.
+- `cache`: per-arguments result cache with a stale-while-failing window;
+  when a refresh fails, the expired value is served for up to `stale_ttl`
+  extra seconds instead of the error. LRU-bounded, custom `key` support.
+- `retry` now honors a numeric `retry_after` attribute on raised exceptions
+  (HTTP Retry-After, `CircuitOpen`), raising the wait to at least that
+  long; disable with `honor_retry_after=False`. Server-sent hints are
+  capped (`retry_after_cap`, default 60s) so a hostile server cannot park
+  the client; the same cap exists as `max_block` on `adaptive_rate_limit`.
+- Performance: success paths measured and tuned (retry no longer builds a
+  backoff iterator unless a failure happens); `benchmarks/bench.py` added,
+  per-policy overhead documented in the README (~0.1 to ~1.3 us/call).
+- Thread-safety stress tests for cache, adaptive rate limit, breaker and
+  the event registry.
+- Repo: AGENTS.md guide for AI coding agents, with Cursor/Copilot/Claude
+  pointer files.
+
 ## 0.1.3 (2026-07-10)
 
 - Metadata-only release: corrected the author name. No code changes.

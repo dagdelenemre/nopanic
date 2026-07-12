@@ -4,7 +4,7 @@
 
 Install: `pip install nopanic`
 
-Imports: `from nopanic import retry, circuit_breaker, CircuitBreaker, timeout, rate_limit, bulkhead, fallback, hedge, compose, backoff, RetryAttempt, ResilienceError, CircuitOpen, BulkheadFull, RateLimited, Policy`
+Imports: `from nopanic import retry, circuit_breaker, CircuitBreaker, timeout, rate_limit, adaptive_rate_limit, looks_throttled, bulkhead, fallback, hedge, cache, compose, backoff, events, Event, subscribe, unsubscribe, RetryAttempt, ResilienceError, CircuitOpen, BulkheadFull, RateLimited, Policy`
 
 ## Rules that apply to every policy
 
@@ -17,9 +17,9 @@ Imports: `from nopanic import retry, circuit_breaker, CircuitBreaker, timeout, r
 
 ## API reference
 
-### retry(attempts=3, on=Exception, backoff=None, *, giveup=None, before_sleep=None)
+### retry(attempts=3, on=Exception, backoff=None, *, giveup=None, before_sleep=None, honor_retry_after=True, retry_after_cap=60.0)
 
-Re-runs the call when it raises an exception matching `on`. `attempts` is the TOTAL number of tries including the first. `backoff` is a plain number (fixed seconds) or a strategy from `nopanic.backoff`; default is `backoff.full_jitter(base=0.1, factor=2.0, cap=30.0)`. `giveup(exc) -> bool` stops retrying even for matching exceptions (use it for permanent errors, e.g. HTTP 4xx except 429). `before_sleep(attempt: RetryAttempt)` runs before each wait; `RetryAttempt` fields: `attempt` (int, 1-based), `exception`, `delay` (seconds). On exhaustion the last exception is re-raised as-is; there is no RetryError wrapper.
+Re-runs the call when it raises an exception matching `on`. `attempts` is the TOTAL number of tries including the first. `backoff` is a plain number (fixed seconds) or a strategy from `nopanic.backoff`; default is `backoff.full_jitter(base=0.1, factor=2.0, cap=30.0)`. `giveup(exc) -> bool` stops retrying even for matching exceptions (use it for permanent errors, e.g. HTTP 4xx except 429). `before_sleep(attempt: RetryAttempt)` runs before each wait; `RetryAttempt` fields: `attempt` (int, 1-based), `exception`, `delay` (seconds). When `honor_retry_after` is True (default) an exception carrying a numeric `retry_after` attribute raises the wait to at least that many seconds, capped at `retry_after_cap` so a hostile server hint cannot park the client (works with `CircuitOpen` and with exceptions built from HTTP Retry-After headers); disable where fail-fast matters. On exhaustion the last exception is re-raised as-is; there is no RetryError wrapper.
 
 ### nopanic.backoff strategies
 
@@ -40,6 +40,18 @@ Raises builtin `TimeoutError` when the call exceeds `seconds`. Async: clean canc
 ### rate_limit(rate, per=1.0, *, burst=None, max_wait=None, clock=time.monotonic)
 
 Token-bucket client-side limiter: `rate` calls per `per` seconds; `burst` is the bucket capacity (default `rate`, must be >= 1). Default behaviour WAITS for a token (roughly FIFO). If `max_wait` is set, a call that would wait longer raises `RateLimited` instead; `max_wait=0` means never wait.
+
+### adaptive_rate_limit(rate, per=1.0, *, min_rate=None, max_rate=None, increase=0.1, decrease=0.5, throttle_on=looks_throttled, max_wait=None, max_block=60.0, clock=time.monotonic)
+
+AIMD token bucket: on an exception matching `throttle_on` the rate is multiplied by `decrease` (floored at `min_rate`, default `rate/10`); every success adds `increase` (capped at `max_rate`, default `rate`). A numeric `retry_after` on the throttle exception additionally blocks the bucket for that many seconds, capped at `max_block`. Default `throttle_on` is `looks_throttled`: true for exceptions with a `retry_after` attribute, a `status`/`status_code` of 429/503, or a `response.status_code` of 429/503 (covers requests/httpx errors). Throttle exceptions still propagate (pair with `retry` to re-attempt them). Inspect the live rate via `.current_rate` (calls per second). Waiting/`max_wait` semantics as in `rate_limit`.
+
+### cache(ttl, *, stale_ttl=0.0, on=Exception, maxsize=1024, key=None, clock=time.monotonic)
+
+Per-arguments result cache. Fresh entries (age <= ttl) are returned without calling. On refresh FAILURE matching `on`, an expired entry younger than `ttl + stale_ttl` is served instead of the error (stale-while-failing); otherwise the error propagates. LRU eviction at `maxsize`. Arguments must be hashable unless `key(*args, **kwargs) -> hashable` is given; entries are keyed per decorated function, so one instance may decorate several functions. No single-flight: concurrent refreshes of the same key are not deduplicated.
+
+### events (module) / subscribe / unsubscribe
+
+`subscribe(listener) -> cancel_callable` registers a process-global listener receiving an `Event` for everything every policy does. `Event` fields: `kind` (e.g. "retry.attempt_failed", "retry.gave_up", "breaker.state_change", "breaker.rejected", "bulkhead.rejected", "ratelimit.waited", "ratelimit.rejected", "ratelimit.throttled", "timeout.expired", "fallback.used", "hedge.launched", "cache.stale_served"), `policy`, `name` (instance name or None), `data` (dict payload). Listeners run synchronously on the calling thread; exceptions from listeners are logged and suppressed; with no listeners the emission cost is negligible. Use a listener to bridge to OpenTelemetry/StatsD/logging.
 
 ### bulkhead(max_concurrent, *, max_wait=None, name=None)
 
@@ -114,7 +126,8 @@ async def ask(prompt: str) -> str:
 - Sync `timeout` does not stop the underlying work; the worker thread is abandoned.
 - A waiting `rate_limit`/`bulkhead` queues callers without bound by default; set `max_wait` when call volume is untrusted.
 - Hook errors (`before_sleep`, `on_state_change`) never break the guarded call; they are logged to the `nopanic.retry` / `nopanic.breaker` loggers.
-- Test deterministically by injecting `clock=` into `CircuitBreaker` / `rate_limit` (any `() -> float` callable).
+- Test deterministically by injecting `clock=` into `CircuitBreaker` / `rate_limit` / `adaptive_rate_limit` / `cache` (any `() -> float` callable).
+- `honor_retry_after` means a `CircuitOpen` inside a retry's `on` filter sleeps out the breaker's open window; that is usually what you want, but pass `honor_retry_after=False` for fail-fast stacks.
 
 ## Files
 

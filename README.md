@@ -29,6 +29,9 @@ Java has [resilience4j](https://github.com/resilience4j/resilience4j). .NET has 
 | Concurrency bulkhead | raw semaphores | ✅ `bulkhead` |
 | Fallback / graceful degradation | try/except sprawl | ✅ `fallback` |
 | Hedged requests (tail latency) | nothing | ✅ `hedge` |
+| Adaptive (AIMD) rate limiting | nothing | ✅ `adaptive_rate_limit` |
+| Cache that survives outages | roll your own | ✅ `cache` (stale-while-failing) |
+| One event stream for all of it | per-library logging | ✅ `events.subscribe` |
 | **All of the above, composable** | none | ✅ `compose` |
 
 These patterns only pay off when they **compose**: a timeout per attempt, retries that respect an open circuit, a fallback that catches whatever is left. Wiring that out of three libraries with three philosophies is exactly the code nobody wants to own. Every service that calls another service needs this, and in the LLM era *every* app calls flaky, rate-limited, high-latency remote APIs.
@@ -61,6 +64,8 @@ def fetch(): ...
 ```
 
 On exhaustion the **original exception is re-raised**, so there is no wrapper to unwrap. Backoff strategies: `fixed`, `exponential`, `full_jitter` (default, AWS-style), `decorrelated_jitter`, or any iterable of floats.
+
+Exceptions carrying a numeric `retry_after` attribute (build one from an HTTP 429's Retry-After header, or let `CircuitOpen` provide it) raise the wait to at least that long; disable with `honor_retry_after=False`.
 
 ### `circuit_breaker`: stop hammering what's already down
 
@@ -127,6 +132,38 @@ async def complete(prompt): ...   # if slow after 800ms, race a duplicate call
 
 The first success wins; losers are cancelled ("The Tail at Scale"). For idempotent async calls only.
 
+### `adaptive_rate_limit`: find the server's real limit
+
+```python
+arl = adaptive_rate_limit(50, per=1.0, min_rate=5)   # start at 50/s, never below 5/s
+
+@arl
+async def call_api(): ...
+```
+
+Classic AIMD, the scheme TCP uses for congestion control: a 429/503 (or any exception carrying `retry_after`) cuts the rate multiplicatively, every success earns a small additive recovery, and an explicit `Retry-After` blocks the bucket for exactly that long. You converge on whatever rate the server actually sustains instead of hardcoding a guess. Inspect it live via `arl.current_rate`.
+
+### `cache`: an outage is not your outage
+
+```python
+@cache(ttl=60.0, stale_ttl=3600.0, on=(ConnectionError, TimeoutError))
+def exchange_rates(base): ...
+```
+
+Fresh values are served from memory; when a refresh *fails*, the expired value is served for up to `stale_ttl` more seconds instead of the error. LRU-bounded, per-arguments keying, injectable clock.
+
+## Observability: one stream for everything
+
+```python
+from nopanic import events
+
+cancel = events.subscribe(
+    lambda e: log.info("%s name=%s %s", e.kind, e.name, dict(e.data))
+)
+```
+
+Every policy emits typed events (`retry.attempt_failed`, `breaker.state_change`, `ratelimit.throttled`, `cache.stale_served`, ...). A listener is all it takes to wire OpenTelemetry, StatsD or metrics counters; listeners can never break the calls they observe, and with no listeners the overhead is a single attribute read.
+
 ## Composition: the whole point
 
 Stack decorators (innermost runs closest to the call), or name the stack once and reuse it:
@@ -180,16 +217,32 @@ def get_json(url):
 
 ## Roadmap
 
-- `on_event` observability hooks with OpenTelemetry helpers
-- Adaptive (AIMD) rate limiting driven by 429/`Retry-After`
-- Cache policy (stale-while-revalidate fallback)
+- OpenTelemetry helper package on top of `events` (spans + metrics)
+- Single-flight deduplication for `cache` refreshes
 - Trio/AnyIO support
+
+## Performance
+
+Resilience must not become its own latency problem. Per-call overhead on the hot (success) path, single thread, measured with [benchmarks/bench.py](benchmarks/bench.py):
+
+| Policy | Overhead per call |
+| --- | --- |
+| `retry` | ~0.15 us |
+| `rate_limit` | ~0.6 us |
+| `adaptive_rate_limit` | ~0.9 us |
+| `cache` (fresh hit) | ~0.9 us |
+| `circuit_breaker` | ~1.1 us |
+| `bulkhead` | ~1.3 us |
+| `events.emit`, no listeners | ~0.1 us |
+
+For scale: a fast HTTP round trip costs 5,000+ us, an LLM call millions. Numbers vary by machine; run the benchmark yourself. Design rules that keep it this way: success paths allocate nothing (retry builds its backoff iterator only after the first failure), event emission with zero listeners is a single attribute read, and locks are held for nanoseconds and never while user code runs.
 
 ## Security & hardening
 
 - Zero runtime dependencies means no transitive supply chain; CI runs `pip-audit`, ruff's flake8-bandit rules and a `python -O` smoke check (no `assert` in library code).
 - All numeric parameters reject NaN/infinity/booleans at construction time: a bad config fails at import, not by silently never tripping a breaker in production.
-- Observability hooks (`before_sleep`, `on_state_change`) can never break the call they observe: their exceptions are logged and suppressed.
+- Observability hooks (`before_sleep`, `on_state_change`) and event listeners can never break the call they observe: their exceptions are logged and suppressed.
+- Server-controlled delays are capped: a hostile `Retry-After: 999999999` cannot park your client (`retry_after_cap` on `retry`, `max_block` on `adaptive_rate_limit`, both defaulting to 60s).
 - `hedge` cancels **and reaps** losing attempts, leaving no orphaned tasks and no "exception was never retrieved" noise.
 - Under untrusted load, set `max_wait` on `rate_limit`/`bulkhead` so backpressure becomes fast failure instead of unbounded queueing.
 
