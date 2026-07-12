@@ -94,7 +94,10 @@ def test_retry_waits_out_an_open_breaker():
     breaker = CircuitBreaker(failure_threshold=1.0, min_calls=1, reset_timeout=0.05)
     calls = []
 
-    @retry(attempts=3, on=(ConnectionError, CircuitOpen), backoff=0)
+    # attempts=6 rather than the minimal 3: on Windows, sleep() can wake a
+    # hair before the monotonic deadline, in which case an extra attempt
+    # gets a CircuitOpen with the tiny remaining retry_after and self-heals.
+    @retry(attempts=6, on=(ConnectionError, CircuitOpen), backoff=0)
     @breaker
     def upstream():
         calls.append(1)
@@ -102,8 +105,9 @@ def test_retry_waits_out_an_open_breaker():
             raise ConnectionError("blip")  # opens the breaker
         return "recovered"
 
-    # Attempt 1 fails and opens the breaker; attempt 2 hits CircuitOpen and,
-    # thanks to honor_retry_after, sleeps ~0.05s; attempt 3 finds the breaker
-    # half-open and the probe succeeds.
+    # Attempt 1 fails and opens the breaker; the next attempt(s) hit
+    # CircuitOpen and, thanks to honor_retry_after, sleep out the remaining
+    # window; the probe then succeeds. The breaker admits the function body
+    # exactly twice regardless of how many attempts were rejected.
     assert upstream() == "recovered"
     assert len(calls) == 2
