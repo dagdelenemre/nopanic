@@ -56,3 +56,20 @@ jobs:
           python-version: "3.12"
       - run: pip install -e .
       - run: python -O -c "import nopanic; print(nopanic.__version__)"
+
+  # Test the BUILT wheel in a clean env, not the editable install, so
+  # packaging defects and import shadowing cannot hide behind `pip install -e`.
+  packaged:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install build pytest
+      - run: python -m build --wheel
+      - name: install the wheel and run the suite against it
+        run: |
+          pip install dist/*.whl
+          python -c "import nopanic; assert 'site-packages' in nopanic.__file__, nopanic.__file__"
+          pytest tests -q

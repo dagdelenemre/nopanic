@@ -235,7 +235,7 @@ Resilience must not become its own latency problem. Per-call overhead on the hot
 | `bulkhead` | ~1.3 us |
 | `events.emit`, no listeners | ~0.1 us |
 
-For scale: a fast HTTP round trip costs 5,000+ us, an LLM call millions. Numbers vary by machine; run the benchmark yourself. Design rules that keep it this way: success paths allocate nothing (retry builds its backoff iterator only after the first failure), event emission with zero listeners is a single attribute read, and locks are held for nanoseconds and never while user code runs.
+For scale: a fast HTTP round trip costs 5,000+ us, an LLM call millions. Numbers vary by machine; run the benchmark yourself. Design rules that keep it this way: success paths allocate nothing (retry builds its backoff iterator only after the first failure), the breaker's failure window is bucketed counters with constant memory no matter the traffic, event emission with zero listeners is a single attribute read, and locks are held for nanoseconds and never while user code runs.
 
 ## Security & hardening
 

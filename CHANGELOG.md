@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.1 (2026-07-13)
+
+Performance and memory fix for the circuit breaker, found by load testing.
+No breaking changes; adds one parameter.
+
+- The failure-rate window is now bucketed (Hystrix-style): `window_buckets`
+  fixed time buckets of counters (default 10) with running totals, instead
+  of one record per call. Window memory is now constant regardless of
+  traffic (previously ~88 MB per million in-window calls) and the rate
+  check is O(1) (previously a full-window scan per failure, which degraded
+  quadratically under sustained partial failure and serialized threads
+  behind the breaker lock: a 1.6M-call multi-threaded load that took over
+  40 minutes now completes in about 2 seconds).
+- Outcomes now expire in bucket-sized steps (window/window_buckets seconds)
+  rather than at exact per-call age; open/close behavior is otherwise
+  unchanged and the full test suite passes as-is.
+- CI now also builds the wheel, installs it into a clean environment and
+  runs the test suite against the installed package, so packaging defects
+  cannot hide behind the editable install.
+
 ## 0.2.0 (2026-07-12)
 
 New capabilities, no breaking changes.
