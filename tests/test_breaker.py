@@ -214,3 +214,37 @@ def test_validation():
         CircuitBreaker(failure_threshold=1.5)
     with pytest.raises(ValueError):
         CircuitBreaker(min_calls=0)
+    with pytest.raises(ValueError):
+        CircuitBreaker(window_buckets=0)
+
+
+def test_window_memory_is_bounded(clock):
+    """Regression guard: the window must never keep a per-call record."""
+    breaker = make_breaker(clock, min_calls=10**9)  # never opens
+
+    @breaker
+    def ok():
+        return 1
+
+    for _ in range(10_000):
+        ok()
+        clock.advance(0.001)
+
+    window = breaker._window
+    assert len(window._counts) == breaker.window_buckets  # fixed buckets only
+    assert window._total == 10_000  # outcomes are counted, not stored
+
+
+def test_failure_rate_is_computed_across_buckets(clock):
+    """Failures spread over several time buckets still open the breaker."""
+    breaker = make_breaker(clock, window=10.0)  # threshold 0.5, min_calls 4
+
+    @breaker
+    def boom():
+        raise ConnectionError("down")
+
+    for _ in range(4):  # one failure per 1s bucket
+        clock.advance(1.0)
+        with pytest.raises(ConnectionError):
+            boom()
+    assert breaker.state == "open"
