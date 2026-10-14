@@ -2,8 +2,9 @@
 
 ## 0.3.0 (2026-10-14)
 
-Correctness fixes found in a full review, plus the most requested missing
-pieces. Upgrading is recommended for everyone using `circuit_breaker`
+Correctness fixes found in a full review, streaming support, retry
+budgets, deadline propagation, per-key policies, live metrics and test
+helpers. Upgrading is recommended for everyone using `circuit_breaker`
 with async code or `timeout` on Python 3.11+.
 
 Fixes:
@@ -29,9 +30,68 @@ Fixes:
 - `looks_throttled` no longer treats nopanic's own signals (`CircuitOpen`,
   `RateLimited`) as server pushback: an adaptive limiter wrapped around a
   tripped breaker used to collapse its own rate.
-- `retry(attempts=...)` now rejects booleans and non-integers.
+- `retry(attempts=...)` now rejects booleans and non-integers; so do all
+  other count parameters (`min_calls`, `max_concurrent`, `max_hedges`, ...).
+- Generator and async generator functions (LLM token streams) were
+  silently left unguarded: a sync wrapper was applied and the policy did
+  nothing. They are now guarded properly (see Streams below), and policies
+  that cannot guard a stream raise `TypeError` at decoration time.
+- `timeout` (sync): every timed-out call left a worker thread behind with
+  no bound, so a hung dependency could exhaust threads. Abandoned workers
+  are now capped per policy (`max_abandoned=64`); beyond that, calls fail
+  fast with `TimeoutError` and a `timeout.saturated` event.
+- `rate_limit` / `adaptive_rate_limit`: a waiter cancelled while queued kept
+  its reserved token, pushing every later caller back (five cancelled
+  waiters delayed the next call by six seconds instead of one). Cancelled
+  waiters now give their token back.
+- `hedge` raced duplicates even for permanent errors. New `on=` filter: a
+  non-matching exception cancels the other attempts and propagates at once.
+- Events did not say which function they were about. `Event` now has a
+  `function` field (qualified name of the guarded function).
 
-New:
+Streams:
+
+- `retry` re-opens a stream that fails before its first item; after items
+  were delivered a failure propagates (no replay).
+- `timeout` bounds each item of an async stream, with `first_item=` for the
+  first one (time to first token); the consumer's own time between items
+  is never counted.
+- `circuit_breaker` records one outcome per stream; `bulkhead` holds its
+  slot for the whole stream; the rate limiters take one token per stream.
+
+Resilience at scale:
+
+- `RetryBudget`: retries capped as a fraction of real traffic across calls
+  (Finagle/gRPC style), shared by any number of `retry(budget=...)`
+  policies. Stops retry storms from multiplying load during an outage.
+- `deadline(seconds)` and `time_remaining()`: an ambient time budget for a
+  whole operation. `timeout` clamps to it, `retry` stops before sleeping
+  past it, rate limiters and bulkheads reject instead of queueing past it.
+  Also usable as a decorator or `compose` member.
+- `keyed(factory, key=...)`: one policy instance per host, tenant or model,
+  created on first use and LRU-bounded.
+- `circuit_breaker(slow_call_duration=..., slow_call_threshold=...)`: slow
+  calls can trip the breaker too; a slow half-open probe re-opens it.
+- `CircuitBreaker.force_open()` and `.disable()` manual states.
+
+Observability and ergonomics:
+
+- Live metrics: `CircuitBreaker.metrics` (`BreakerMetrics`),
+  `bulkhead.in_flight`, `rate_limit.available_tokens` (also adaptive),
+  `timeout.abandoned`, `cache.size`, `RetryBudget.available`.
+- `guard()` context managers for blocks of code: `with breaker.guard():`,
+  `with bulkhead.guard():`, `with limiter.guard():` (sync and async), and
+  `async with timeout(...).guard():`.
+- `name=` on every policy, carried by its events; `retry.gave_up` events
+  carry a `reason` (attempts, giveup, backoff, max_time, deadline, budget).
+- `events.log_to(logger)`: one log line per event, with structured `extra`
+  fields.
+- `nopanic.testing`: `instant()` skips and records every wait, and
+  `capture_events()` collects events, so test suites never sleep.
+- Bulkhead documentation now states that sync callers and each event loop
+  get separate capacity.
+
+Other new:
 
 - `retry(max_time=...)`: a total time budget. Retrying stops as soon as the
   next wait would end past the deadline, so no attempt starts late.
@@ -54,7 +114,9 @@ New:
 
 Compatibility notes: `compose` is now a class (still a decorator, same
 call signature). Type checkers will see `RetryAttempt.exception` as
-optional.
+optional. Sync `timeout` now fails fast once 64 abandoned workers are still
+running (`max_abandoned=None` restores the old unbounded behavior).
+`CircuitBreaker.state` can also be `"forced_open"` or `"disabled"`.
 
 ## 0.2.1 (2026-07-13)
 

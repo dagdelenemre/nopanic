@@ -49,7 +49,9 @@ Operational cautions (by design, documented rather than hidden):
 
 - The **sync `timeout`** abandons its worker thread on expiry, because Python
   cannot kill threads. The abandoned call keeps running until it returns; prefer the
-  async path or the callee's native timeout when that matters.
+  async path or the callee's native timeout when that matters. Abandoned workers
+  are capped per policy (`max_abandoned`, default 64): beyond that, calls fail fast
+  instead of starting threads, so a hung dependency cannot exhaust them.
 - A **waiting `rate_limit` or `bulkhead`** can queue callers without bound by
   default. If untrusted parties control your call volume, set `max_wait` so
   pressure turns into fast `RateLimited`/`BulkheadFull` failures instead of

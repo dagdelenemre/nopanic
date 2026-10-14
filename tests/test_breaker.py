@@ -296,3 +296,119 @@ def test_interrupted_sync_probe_releases_its_slot(clock):
     assert breaker.state == "half_open"  # no outcome recorded...
     assert probe(False) == "ok"  # ...but the slot is free again
     assert breaker.state == "closed"
+
+
+def test_slow_calls_open_the_breaker(clock):
+    breaker = make_breaker(
+        clock, min_calls=4, slow_call_duration=2.0, slow_call_threshold=0.5
+    )
+
+    @breaker
+    def call(seconds):
+        clock.advance(seconds)  # the call "takes" this long
+        return "ok"
+
+    call(0.1)
+    call(0.1)
+    call(3.0)
+    assert breaker.state == "closed"
+    call(3.0)  # 2 of 4 slow: 50%
+    assert breaker.state == "open"
+    m = breaker.metrics
+    assert (m.calls, m.slow_calls, m.failures) == (4, 2, 0)
+    assert m.slow_call_rate == pytest.approx(0.5)
+
+
+def test_slow_half_open_probe_reopens(clock):
+    breaker = make_breaker(clock, min_calls=1, slow_call_duration=1.0)
+    trip(breaker, 1)
+    clock.advance(10.0)
+
+    @breaker
+    def probe():
+        clock.advance(5.0)
+        return "late"
+
+    assert probe() == "late"  # the caller still gets the answer...
+    assert breaker.state == "open"  # ...but the dependency is not healthy
+
+
+def test_force_open_and_disable(clock):
+    breaker = make_breaker(clock)
+    calls = []
+
+    @breaker
+    def call():
+        calls.append(1)
+        raise ConnectionError
+
+    breaker.force_open()
+    clock.advance(1000.0)  # never auto-transitions
+    with pytest.raises(CircuitOpen):
+        call()
+    assert breaker.state == "forced_open"
+
+    breaker.disable()
+    for _ in range(10):
+        with pytest.raises(ConnectionError):
+            call()
+    assert breaker.state == "disabled"  # nothing recorded, never opens
+    assert breaker.metrics.calls == 0
+
+    breaker.reset()
+    assert breaker.state == "closed"
+    assert len(calls) == 10
+
+
+def test_metrics_snapshot(clock):
+    breaker = make_breaker(clock, min_calls=100)
+
+    @breaker
+    def call(ok):
+        if not ok:
+            raise ConnectionError
+
+    call(True)
+    with pytest.raises(ConnectionError):
+        call(False)
+    m = breaker.metrics
+    assert (m.state, m.calls, m.failures, m.failure_rate) == ("closed", 2, 1, 0.5)
+
+
+def test_guard_judges_a_block(clock):
+    breaker = make_breaker(clock, min_calls=2)
+    for _ in range(2):
+        with pytest.raises(ConnectionError), breaker.guard():
+            raise ConnectionError
+    assert breaker.state == "open"
+    with pytest.raises(CircuitOpen), breaker.guard():
+        pass
+
+
+def test_async_guard_releases_probe_on_cancel(clock):
+    breaker = make_breaker(clock, min_calls=1)
+    trip(breaker, 1)
+    clock.advance(10.0)
+
+    async def scenario():
+        async def probe():
+            async with breaker.guard():
+                await asyncio.sleep(10.0)
+
+        task = asyncio.ensure_future(probe())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with breaker.guard():
+            pass
+
+    asyncio.run(scenario())
+    assert breaker.state == "closed"
+
+
+def test_bool_counts_are_rejected():
+    with pytest.raises(TypeError):
+        CircuitBreaker(min_calls=True)
+    with pytest.raises(ValueError):
+        CircuitBreaker(slow_call_threshold=0)

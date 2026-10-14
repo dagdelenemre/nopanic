@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import threading
 import time
 
 import pytest
@@ -135,3 +136,51 @@ def test_async_timeout_runs_in_the_callers_context():
         return await handler()
 
     assert asyncio.run(scenario()) == "req-7"
+
+
+def test_abandoned_sync_workers_are_capped():
+    release = threading.Event()
+    policy = timeout(0.01, max_abandoned=3)
+
+    @policy
+    def stuck():
+        release.wait(5.0)
+
+    try:
+        for _ in range(3):
+            with pytest.raises(TimeoutError, match="abandoned"):
+                stuck()
+        assert policy.abandoned == 3
+        with pytest.raises(TimeoutError, match="still running"):
+            stuck()  # fails fast: no fourth thread
+        assert policy.abandoned == 3
+    finally:
+        release.set()
+    for _ in range(100):  # the workers finish and are no longer counted
+        if policy.abandoned == 0:
+            break
+        time.sleep(0.01)
+    assert policy.abandoned == 0
+
+
+def test_async_guard_bounds_a_block():
+    async def scenario():
+        async with timeout(0.05).guard():
+            await asyncio.sleep(5.0)
+
+    with pytest.raises(TimeoutError, match="block"):
+        asyncio.run(scenario())
+
+
+def test_async_guard_passes_own_timeout_errors_through():
+    async def scenario():
+        async with timeout(5.0).guard():
+            raise DatabaseTimeout("mine")
+
+    with pytest.raises(DatabaseTimeout):
+        asyncio.run(scenario())
+
+
+def test_sync_guard_is_rejected():
+    with pytest.raises(TypeError), timeout(1.0).guard():
+        pass

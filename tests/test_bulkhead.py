@@ -185,3 +185,49 @@ def test_async_timed_out_and_cancelled_waiters_never_leak_permits():
         await asyncio.gather(*tasks)
 
     asyncio.run(scenario())
+
+
+def test_in_flight_and_sync_guard():
+    bh = bulkhead(2, max_wait=0)
+    assert bh.in_flight == 0
+    with bh.guard():
+        assert bh.in_flight == 1
+        with bh.guard():
+            assert bh.in_flight == 2
+            with pytest.raises(BulkheadFull), bh.guard():
+                pass
+    assert bh.in_flight == 0
+
+
+def test_async_guard_counts_per_loop():
+    bh = bulkhead(1, max_wait=0)
+
+    async def scenario():
+        async with bh.guard():
+            assert bh.in_flight == 1
+            with pytest.raises(BulkheadFull):
+                async with bh.guard():
+                    pass
+        assert bh.in_flight == 0
+
+    asyncio.run(scenario())
+
+
+def test_rejection_event_names_the_function():
+    from nopanic.testing import capture_events
+
+    bh = bulkhead(1, max_wait=0, name="reports")
+
+    @bh
+    def render():
+        with pytest.raises(BulkheadFull):
+            render_inner()
+
+    @bh
+    def render_inner():
+        pass
+
+    with capture_events("bulkhead.") as seen:
+        render()
+    assert seen[0].name == "reports"
+    assert seen[0].function.endswith("render_inner")

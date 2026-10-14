@@ -192,3 +192,17 @@ def test_local_resilience_signals_are_not_server_pushback(clock):
         with pytest.raises((ConnectionError, CircuitOpen)):
             call()
     assert limiter.current_rate == pytest.approx(10.0)
+
+
+def test_guard_feeds_outcomes_to_the_adaptive_rate(clock):
+    class Throttled(Exception):
+        status_code = 429
+
+    limiter = adaptive_rate_limit(10, clock=clock)
+    with pytest.raises(Throttled), limiter.guard():
+        raise Throttled
+    assert limiter.current_rate == pytest.approx(5.0)
+    clock.advance(1.0)
+    with limiter.guard():
+        pass
+    assert limiter.current_rate == pytest.approx(5.1)

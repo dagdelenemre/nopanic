@@ -79,3 +79,30 @@ def test_validation():
         hedge(delay=-1)
     with pytest.raises(ValueError):
         hedge(delay=0.1, max_hedges=0)
+
+
+def test_permanent_errors_are_not_hedged():
+    attempts = []
+
+    @hedge(delay=0.01, max_hedges=3, on=ConnectionError)
+    async def bad_request():
+        attempts.append(1)
+        raise ValueError("400")
+
+    with pytest.raises(ValueError):
+        asyncio.run(bad_request())
+    assert len(attempts) == 1
+
+
+def test_transient_errors_still_hedge_immediately():
+    attempts = []
+
+    @hedge(delay=10.0, max_hedges=2, on=ConnectionError)
+    async def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise ConnectionError
+        return "ok"
+
+    assert asyncio.run(flaky()) == "ok"
+    assert len(attempts) == 3

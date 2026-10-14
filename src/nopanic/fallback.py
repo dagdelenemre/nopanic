@@ -20,16 +20,18 @@ class fallback(Policy):
             exception and returning the substitute (async callables are
             awaited when the wrapped function is async).
         on: Which exceptions trigger the fallback; others propagate.
+        name: Diagnostic name carried by this policy's events.
 
     Typically the outermost policy in a stack: everything the inner layers
     could not absorb turns into a degraded-but-valid response.
     """
 
-    __slots__ = ("handler", "on")
+    __slots__ = ("handler", "name", "on")
 
-    def __init__(self, handler: Any, *, on: ExcFilter = Exception) -> None:
+    def __init__(self, handler: Any, *, on: ExcFilter = Exception, name: str | None = None) -> None:
         self.handler = handler
         self.on = on
+        self.name = name
 
     def _run_sync(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -43,7 +45,7 @@ class fallback(Policy):
                 raise TypeError(
                     "async fallback handler cannot be used with a sync function"
                 ) from exc
-            emit("fallback.used", "fallback", exception=exc)
+            emit("fallback.used", "fallback", self.name, fn, exception=exc)
             if callable(self.handler):
                 return self.handler(exc)
             return self.handler
@@ -56,7 +58,7 @@ class fallback(Policy):
         except Exception as exc:
             if not exc_matches(exc, self.on):
                 raise
-            emit("fallback.used", "fallback", exception=exc)
+            emit("fallback.used", "fallback", self.name, fn, exception=exc)
             if callable(self.handler):
                 result = self.handler(exc)
                 if inspect.isawaitable(result):

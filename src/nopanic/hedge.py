@@ -13,7 +13,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from ._core import Policy, positive_number
+from ._core import ExcFilter, Policy, exc_matches, positive_int, positive_number
 from .events import emit
 
 __all__ = ["hedge"]
@@ -26,20 +26,31 @@ class hedge(Policy):
         delay: Seconds to wait before launching each additional attempt.
         max_hedges: Maximum number of *extra* attempts (so total concurrent
             attempts is at most ``1 + max_hedges``).
+        on: Which failures are worth hedging. An attempt failing with a
+            matching exception lets the others continue (and launches the
+            next hedge at once); any other exception is permanent: it
+            cancels the remaining attempts and propagates immediately, so a
+            400-style error is not repeated ``max_hedges`` more times.
+        name: Diagnostic name carried by this policy's events.
 
     The first successful attempt wins and all others are cancelled. If every
-    attempt fails, the last failure is re-raised. If an attempt fails while
-    hedges remain, the next hedge is launched immediately rather than waiting
-    out the delay.
+    attempt fails, the last failure is re-raised.
     """
 
-    __slots__ = ("delay", "max_hedges")
+    __slots__ = ("delay", "max_hedges", "name", "on")
 
-    def __init__(self, *, delay: float, max_hedges: int = 1) -> None:
-        if max_hedges < 1:
-            raise ValueError("max_hedges must be >= 1")
+    def __init__(
+        self,
+        *,
+        delay: float,
+        max_hedges: int = 1,
+        on: ExcFilter = Exception,
+        name: str | None = None,
+    ) -> None:
+        self.max_hedges = positive_int("max_hedges", max_hedges)
         self.delay = positive_number("delay", delay, allow_zero=True)
-        self.max_hedges = max_hedges
+        self.on = on
+        self.name = name
 
     def _run_sync(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -60,26 +71,30 @@ class hedge(Policy):
                 )
                 if not done:
                     # Nothing finished within the delay: launch a hedge.
-                    emit("hedge.launched", "hedge", delay=self.delay)
+                    emit("hedge.launched", "hedge", self.name, fn, delay=self.delay)
                     tasks.add(asyncio.ensure_future(fn(*args, **kwargs)))
                     hedges_left -= 1
                     continue
                 for task in done:
                     tasks.discard(task)
+                    if task.cancelled():  # cancelled from elsewhere: no outcome
+                        continue
                     exc = task.exception()
                     if exc is None:
                         return task.result()
+                    if not exc_matches(exc, self.on):
+                        raise exc  # permanent: no point racing more copies
                     last_exc = exc
                 if not tasks:
                     if hedges_left > 0:
                         # Everything so far failed fast; hedge immediately.
-                        emit("hedge.launched", "hedge", delay=0.0)
+                        emit("hedge.launched", "hedge", self.name, fn, delay=0.0)
                         tasks.add(asyncio.ensure_future(fn(*args, **kwargs)))
                         hedges_left -= 1
                     elif last_exc is not None:
                         raise last_exc
-                    else:  # defensive: cannot happen, but never `raise None`
-                        raise RuntimeError("hedge finished with no result and no exception")
+                    else:
+                        raise asyncio.CancelledError("every hedged attempt was cancelled")
         finally:
             for task in tasks:
                 task.cancel()

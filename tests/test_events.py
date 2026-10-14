@@ -154,3 +154,46 @@ def test_event_is_immutable(seen):
     events.emit("x.test", "x", detail=1)
     with pytest.raises(AttributeError):
         seen[0].kind = "changed"
+
+
+def test_events_name_the_policy_instance_and_function():
+    from nopanic import retry
+
+    seen = []
+    cancel = subscribe(seen.append)
+    try:
+
+        @retry(attempts=2, backoff=0, name="payments")
+        def charge():
+            raise ConnectionError
+
+        with pytest.raises(ConnectionError):
+            charge()
+    finally:
+        cancel()
+    assert {e.name for e in seen} == {"payments"}
+    assert all(e.function.endswith("charge") for e in seen)
+
+
+def test_log_to_writes_one_line_per_event(caplog):
+    import logging
+
+    from nopanic import events, retry
+
+    logger = logging.getLogger("resilience-test")
+    cancel = events.log_to(logger, level=logging.WARNING)
+    try:
+
+        @retry(attempts=2, backoff=0)
+        def down():
+            raise ConnectionError
+
+        with caplog.at_level(logging.WARNING, logger="resilience-test"), pytest.raises(
+            ConnectionError
+        ):
+            down()
+    finally:
+        cancel()
+    kinds = [r.nopanic_kind for r in caplog.records]
+    assert kinds == ["retry.attempt_failed", "retry.gave_up"]
+    assert "down" in caplog.records[0].getMessage()

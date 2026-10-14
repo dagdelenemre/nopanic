@@ -8,12 +8,16 @@ instead: it is the compact API reference.
 
 nopanic is a zero-dependency Python resilience toolkit: retry, circuit
 breaker, timeout, rate limit (fixed and adaptive/AIMD), bulkhead, fallback,
-hedged requests and a stale-while-failing cache, all as composable
-decorators working identically on `def` and `async def`.
+hedged requests, a stale-while-failing cache, retry budgets, deadlines and
+per-key policies, all as composable decorators working identically on
+`def` and `async def` (and, where it makes sense, on generator functions).
 
 Layout: one policy per module in `src/nopanic/`; shared machinery in
-`_core.py` (Policy base class, exception filters, numeric validation);
-observability in `events.py`; tests mirror modules in `tests/`.
+`_core.py` (Policy base class and stream dispatch, exception filters,
+numeric validation, the ambient deadline, the sleep hook used by
+`testing.instant()`); the bucketed counter window in `_window.py`;
+observability in `events.py`; test helpers for users in `testing.py`;
+tests mirror modules in `tests/` (streams in `tests/test_streams.py`).
 
 ## Commands
 
@@ -33,7 +37,10 @@ CI runs all of this on 3 OSes x Python 3.10-3.14 plus `pip-audit` and a
 1. **Zero runtime dependencies.** Nothing gets added to `[project.dependencies]`.
 2. **Sync/async parity.** Every policy implements `_run_sync` and
    `_run_async` with identical semantics. Documented exceptions: `hedge` is
-   async-only; sync `timeout` abandons its worker thread.
+   async-only; sync `timeout` abandons its worker thread (capped by
+   `max_abandoned`); `timeout` guards async streams and async blocks only.
+   Stream support is declared in `_STREAMS`; anything else must raise
+   `TypeError` at decoration time, never silently pass through.
 3. **No wrapper exceptions.** User exceptions re-raise unchanged. Policies
    raise only `CircuitOpen` / `BulkheadFull` / `RateLimited` (subclasses of
    `ResilienceError`) and builtin `TimeoutError`.
@@ -45,6 +52,9 @@ CI runs all of this on 3 OSes x Python 3.10-3.14 plus `pip-audit` and a
    (e.g. Retry-After hints) must be capped before it is slept on.
 7. **Injectable time.** Stateful policies take `clock=`; tests must not
    sleep for correctness (tiny real sleeps for actual concurrency are fine).
+   Policies sleep only through `_core.sleep` / `_core.asleep` so that
+   `testing.instant()` can skip the wait, and every wait honors the ambient
+   deadline (`_core.time_remaining()`).
 8. **Hot path stays cheap.** The success path of any policy must not
    allocate or lock more than it already does; run the benchmark when
    touching it. Emission with zero listeners must stay a near-no-op.

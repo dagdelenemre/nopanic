@@ -86,3 +86,47 @@ def test_rejection_carries_retry_after(clock):
     with pytest.raises(RateLimited) as excinfo:
         call()
     assert excinfo.value.retry_after == pytest.approx(2.0)
+
+
+def test_cancelled_waiters_give_their_tokens_back():
+    limiter = rate_limit(1, per=1.0)
+
+    @limiter
+    async def call():
+        return 1
+
+    async def scenario():
+        await call()  # spends the only token
+        waiters = [asyncio.ensure_future(call()) for _ in range(5)]
+        await asyncio.sleep(0.01)
+        for w in waiters:
+            w.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+        return limiter.available_tokens
+
+    # Without refunds the bucket would sit at about -5 (six seconds of debt).
+    assert asyncio.run(scenario()) > -1.0
+
+
+def test_guard_takes_a_token(clock):
+    limiter = rate_limit(2, per=10.0, max_wait=0, clock=clock)
+    with limiter.guard():
+        pass
+    assert limiter.available_tokens == pytest.approx(1.0)
+    with limiter.guard():
+        pass
+    with pytest.raises(RateLimited), limiter.guard():
+        pass
+
+
+def test_async_guard(clock):
+    limiter = rate_limit(1, per=10.0, max_wait=0, clock=clock)
+
+    async def scenario():
+        async with limiter.guard():
+            pass
+        with pytest.raises(RateLimited):
+            async with limiter.guard():
+                pass
+
+    asyncio.run(scenario())

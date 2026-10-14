@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import logging
-import math
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Generator, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
-from ._core import ExcFilter, Policy, exc_matches, positive_number
+from . import _core
+from ._core import ExcFilter, Policy, exc_matches, finite_hint, positive_int, positive_number
 from .backoff import Backoff, as_backoff, full_jitter
+from .budget import RetryBudget
 from .events import emit
 
 __all__ = ["RetryAttempt", "retry"]
@@ -65,8 +66,8 @@ class retry(Policy):
             numeric ``retry_after`` attribute (seconds) raises the wait to at
             least that long, plus a small safety margin (5% + 50ms) so the
             deadline is strictly passed despite OS timer granularity. Works
-            out of the box with ``CircuitOpen`` and with any exception you
-            build from an HTTP 429's Retry-After header.
+            out of the box with ``CircuitOpen``, ``RateLimited`` and with any
+            exception you build from an HTTP 429's Retry-After header.
         retry_after_cap: Upper bound on an honored ``retry_after`` hint. The
             hint comes from the remote side; without a cap a hostile or
             buggy server could park the client for arbitrary time.
@@ -74,18 +75,27 @@ class retry(Policy):
             the first attempt. Retrying stops as soon as the next wait would
             end past the budget, so no attempt ever starts after the
             deadline. ``None`` (default) means attempts alone bound retrying.
+            An ambient :class:`~nopanic.deadline` is respected the same way.
         on_result: Optional predicate over the *return value*; returning
             True treats the result as a failure and retries (an HTTP client
             that returns a 503 response instead of raising). When retrying
-            stops, the last result is returned as-is.
+            stops, the last result is returned as-is. Not applied to streams.
+        budget: Optional :class:`~nopanic.RetryBudget` shared with other
+            retry policies; when it is spent, retrying stops early.
+        name: Diagnostic name carried by this policy's events.
         clock: Monotonic time source for ``max_time``; injectable for tests.
 
     When attempts are exhausted the *original last exception* is re-raised
     unchanged; there is no wrapper exception to unwrap. If the backoff
-    strategy stops yielding delays, or the ``max_time`` budget would be
-    exceeded, retrying stops early the same way. An
+    strategy stops yielding delays, or the ``max_time`` budget, deadline or
+    retry budget would be exceeded, retrying stops early the same way. An
     exception raised *inside* ``before_sleep`` is logged and suppressed —
     observability hooks are never allowed to break the call they observe.
+
+    On a generator or async generator function (an LLM token stream, say),
+    the *opening* of the stream is retried: failures before the first item
+    are retried like any call, while a failure after items were delivered
+    propagates, since those items cannot be taken back.
     """
 
     __slots__ = (
@@ -93,13 +103,17 @@ class retry(Policy):
         "attempts",
         "backoff",
         "before_sleep",
+        "budget",
         "giveup",
         "honor_retry_after",
         "max_time",
+        "name",
         "on",
         "on_result",
         "retry_after_cap",
     )
+
+    _STREAMS: ClassVar[frozenset[str]] = frozenset({"sync", "async"})
 
     def __init__(
         self,
@@ -113,13 +127,11 @@ class retry(Policy):
         retry_after_cap: float = 60.0,
         max_time: float | None = None,
         on_result: Callable[[Any], bool] | None = None,
+        budget: RetryBudget | None = None,
+        name: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if isinstance(attempts, bool) or not isinstance(attempts, int):
-            raise TypeError(f"attempts must be an int, got {type(attempts).__name__}")
-        if attempts < 1:
-            raise ValueError("attempts must be >= 1")
-        self.attempts = attempts
+        self.attempts = positive_int("attempts", attempts)
         self.on = on
         self.backoff = full_jitter() if backoff is None else as_backoff(backoff)
         self.giveup = giveup
@@ -128,10 +140,28 @@ class retry(Policy):
         self.retry_after_cap = positive_number("retry_after_cap", retry_after_cap)
         self.max_time = None if max_time is None else positive_number("max_time", max_time)
         self.on_result = on_result
+        self.budget = budget
+        self.name = name
         self._clock = clock
+
+    def _stop(
+        self, fn: Callable[..., Any], attempt: int, exc: Exception | None, result: Any, reason: str
+    ) -> None:
+        extra = {} if exc is not None else {"result": result}
+        emit(
+            "retry.gave_up",
+            "retry",
+            self.name,
+            fn,
+            attempt=attempt,
+            exception=exc,
+            reason=reason,
+            **extra,
+        )
 
     def _next_delay(
         self,
+        fn: Callable[..., Any],
         exc: Exception | None,
         result: Any,
         attempt: int,
@@ -145,35 +175,43 @@ class retry(Policy):
         """
         if exc is not None and not exc_matches(exc, self.on):
             return None
-        # Result-triggered retries report the rejected value; exception ones
-        # keep their established payload.
-        extra = {} if exc is not None else {"result": result}
-        if attempt >= self.attempts or (
-            exc is not None and self.giveup is not None and self.giveup(exc)
-        ):
-            emit("retry.gave_up", "retry", attempt=attempt, exception=exc, **extra)
+        if attempt >= self.attempts:
+            self._stop(fn, attempt, exc, result, "attempts")
+            return None
+        if exc is not None and self.giveup is not None and self.giveup(exc):
+            self._stop(fn, attempt, exc, result, "giveup")
             return None
         try:
             delay = max(0.0, next(delays))
         except StopIteration:
-            emit("retry.gave_up", "retry", attempt=attempt, exception=exc, **extra)
+            self._stop(fn, attempt, exc, result, "backoff")
             return None  # strategy exhausted: re-raise the original error
         if exc is not None and self.honor_retry_after:
-            hint = getattr(exc, "retry_after", None)
-            if (
-                isinstance(hint, (int, float))
-                and not isinstance(hint, bool)
-                and math.isfinite(hint)
-                and hint > 0
-            ):
-                padded = float(hint) * _RETRY_AFTER_FACTOR + _RETRY_AFTER_MARGIN
+            hint = finite_hint(getattr(exc, "retry_after", None))
+            if hint is not None:
+                padded = hint * _RETRY_AFTER_FACTOR + _RETRY_AFTER_MARGIN
                 delay = max(delay, min(padded, self.retry_after_cap))
         if self.max_time is not None and self._clock() - start + delay > self.max_time:
             # The next attempt could only start past the deadline.
-            emit("retry.gave_up", "retry", attempt=attempt, exception=exc, **extra)
+            self._stop(fn, attempt, exc, result, "max_time")
             return None
+        remaining = _core.time_remaining()
+        if remaining is not None and delay >= remaining:
+            self._stop(fn, attempt, exc, result, "deadline")
+            return None
+        if self.budget is not None and not self.budget.try_withdraw():
+            self._stop(fn, attempt, exc, result, "budget")
+            return None
+        extra = {} if exc is not None else {"result": result}
         emit(
-            "retry.attempt_failed", "retry", attempt=attempt, delay=delay, exception=exc, **extra
+            "retry.attempt_failed",
+            "retry",
+            self.name,
+            fn,
+            attempt=attempt,
+            delay=delay,
+            exception=exc,
+            **extra,
         )
         if self.before_sleep is not None:
             try:
@@ -182,12 +220,19 @@ class retry(Policy):
                 _log.exception("before_sleep hook raised; ignoring so the retry proceeds")
         return delay
 
+    def _begin(self) -> float:
+        if self.budget is not None:
+            self.budget.deposit()
+        return 0.0 if self.max_time is None else self._clock()
+
     def _run_sync(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
         # The iterator is created lazily: the success path pays nothing.
         delays: Iterator[float] | None = None
-        start = 0.0 if self.max_time is None else self._clock()
+        # Hot path: without a budget or max_time there is nothing to set up.
+        no_setup = self.budget is None and self.max_time is None
+        start = 0.0 if no_setup else self._begin()
         attempt = 0
         while True:
             attempt += 1
@@ -196,7 +241,7 @@ class retry(Policy):
             except Exception as exc:
                 if delays is None:
                     delays = iter(self.backoff)
-                delay = self._next_delay(exc, None, attempt, delays, start)
+                delay = self._next_delay(fn, exc, None, attempt, delays, start)
                 if delay is None:
                     raise
             else:
@@ -204,16 +249,18 @@ class retry(Policy):
                     return result
                 if delays is None:
                     delays = iter(self.backoff)
-                delay = self._next_delay(None, result, attempt, delays, start)
+                delay = self._next_delay(fn, None, result, attempt, delays, start)
                 if delay is None:
                     return result
-            time.sleep(delay)
+            _core.sleep(delay)
 
     async def _run_async(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
         delays: Iterator[float] | None = None
-        start = 0.0 if self.max_time is None else self._clock()
+        # Hot path: without a budget or max_time there is nothing to set up.
+        no_setup = self.budget is None and self.max_time is None
+        start = 0.0 if no_setup else self._begin()
         attempt = 0
         while True:
             attempt += 1
@@ -222,7 +269,7 @@ class retry(Policy):
             except Exception as exc:
                 if delays is None:
                     delays = iter(self.backoff)
-                delay = self._next_delay(exc, None, attempt, delays, start)
+                delay = self._next_delay(fn, exc, None, attempt, delays, start)
                 if delay is None:
                     raise
             else:
@@ -230,7 +277,60 @@ class retry(Policy):
                     return result
                 if delays is None:
                     delays = iter(self.backoff)
-                delay = self._next_delay(None, result, attempt, delays, start)
+                delay = self._next_delay(fn, None, result, attempt, delays, start)
                 if delay is None:
                     return result
-            await asyncio.sleep(delay)
+            await _core.asleep(delay)
+
+    def _run_sync_gen(
+        self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Generator[Any, None, None]:
+        delays: Iterator[float] | None = None
+        start = self._begin()
+        attempt = 0
+        while True:
+            attempt += 1
+            with contextlib.closing(fn(*args, **kwargs)) as items:
+                try:
+                    first = next(items)
+                except StopIteration:
+                    return
+                except Exception as exc:
+                    if delays is None:
+                        delays = iter(self.backoff)
+                    delay = self._next_delay(fn, exc, None, attempt, delays, start)
+                    if delay is None:
+                        raise
+                else:
+                    # Delivered items cannot be retracted: from here on the
+                    # stream is the caller's, failures included.
+                    yield first
+                    yield from items
+                    return
+            _core.sleep(delay)
+
+    async def _run_async_gen(
+        self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> AsyncGenerator[Any, None]:
+        delays: Iterator[float] | None = None
+        start = self._begin()
+        attempt = 0
+        while True:
+            attempt += 1
+            async with contextlib.aclosing(fn(*args, **kwargs)) as items:
+                try:
+                    first = await items.__anext__()
+                except StopAsyncIteration:
+                    return
+                except Exception as exc:
+                    if delays is None:
+                        delays = iter(self.backoff)
+                    delay = self._next_delay(fn, exc, None, attempt, delays, start)
+                    if delay is None:
+                        raise
+                else:
+                    yield first
+                    async for item in items:
+                        yield item
+                    return
+            await _core.asleep(delay)

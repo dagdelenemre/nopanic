@@ -2,7 +2,7 @@
 
 **The unified resilience toolkit for Python.**
 
-Retries, circuit breakers, timeouts, rate limits, bulkheads and hedged requests: one decorator-based API, identical for sync and async code, with **zero runtime dependencies**.
+Retries, circuit breakers, timeouts, rate limits, bulkheads, hedged requests, retry budgets and deadlines: one decorator-based API, identical for sync and async code (LLM token streams included), with **zero runtime dependencies**.
 
 ```python
 from nopanic import retry, circuit_breaker, timeout, backoff
@@ -31,7 +31,11 @@ Java has [resilience4j](https://github.com/resilience4j/resilience4j). .NET has 
 | Hedged requests (tail latency) | nothing | ✅ `hedge` |
 | Adaptive (AIMD) rate limiting | nothing | ✅ `adaptive_rate_limit` |
 | Cache that survives outages | roll your own | ✅ `cache` (stale-while-failing) |
-| One event stream for all of it | per-library logging | ✅ `events.subscribe` |
+| Retry budgets (stop retry storms) | nothing | ✅ `RetryBudget` |
+| Deadline propagation | nothing | ✅ `deadline` |
+| Streaming (LLM tokens) | nothing | ✅ every stateful policy guards generators |
+| One breaker / limiter per host or tenant | roll your own | ✅ `keyed` |
+| One event stream for all of it | per-library logging | ✅ `events.subscribe` / `events.log_to` |
 | **All of the above, composable** | none | ✅ `compose` |
 
 These patterns only pay off when they **compose**: a timeout per attempt, retries that respect an open circuit, a fallback that catches whatever is left. Wiring that out of three libraries with three philosophies is exactly the code nobody wants to own. Every service that calls another service needs this, and in the LLM era *every* app calls flaky, rate-limited, high-latency remote APIs.
@@ -46,7 +50,7 @@ Python 3.10+. No dependencies. Fully typed (`py.typed`).
 
 ## The toolkit
 
-Every policy is a decorator that works on both `def` and `async def` functions. Policies with shared state (breaker, bulkhead, rate limit) are created once and applied to every call site that talks to the same dependency.
+Every policy is a decorator that works on both `def` and `async def` functions. Policies with shared state (breaker, bulkhead, rate limit) are created once and applied to every call site that talks to the same dependency. Every policy also takes an optional `name=` that shows up in its events.
 
 ### `retry`: try again, politely
 
@@ -76,6 +80,24 @@ async def get(url): return await client.get(url)
 
 `max_time` never starts an attempt past the deadline; when `on_result` retries run out, the last result is returned as-is.
 
+#### Retry budgets: no more retry storms
+
+Three attempts per call means up to three times the load on a dependency that is already struggling, from every client at once. A `RetryBudget` caps retries *across* calls, as a fraction of real traffic (the Finagle / gRPC / Envoy approach):
+
+```python
+from nopanic import RetryBudget, retry
+
+api_budget = RetryBudget(ratio=0.1)   # retries <= 10% of calls (+1/s floor)
+
+@retry(attempts=4, budget=api_budget)
+def get_user(uid): ...
+
+@retry(attempts=4, budget=api_budget)   # one budget per downstream
+def get_orders(uid): ...
+```
+
+Under a real outage your retry traffic shrinks to the floor instead of multiplying. When the budget is spent, the original exception is re-raised (`retry.gave_up`, reason `budget`).
+
 ### `circuit_breaker`: stop hammering what's already down
 
 ```python
@@ -96,6 +118,11 @@ async def charge(order): ...
 
 While open, calls fail instantly with `CircuitOpen(retry_after=...)` instead of stacking up on a dead dependency. One instance = one dependency; decorate as many functions with it as you like, and check `payments.state` anytime.
 
+- **Slow calls trip it too.** `slow_call_duration=2.0, slow_call_threshold=0.5` opens the breaker when half the calls take 2s or more: a dependency that answers too slowly is often as harmful as one that fails.
+- **Manual control.** `force_open()` (maintenance, kill switch), `disable()` (let everything through, record nothing), `reset()`.
+- **Health checks.** `payments.metrics` gives a consistent snapshot: state, calls, failures, slow calls and both rates.
+- **Blocks, not just functions.** `with payments.guard():` / `async with payments.guard():`.
+
 ### `timeout`: bound every attempt
 
 ```python
@@ -103,7 +130,7 @@ While open, calls fail instantly with `CircuitOpen(retry_after=...)` instead of 
 async def lookup(): ...   # cancelled cleanly via the event loop
 ```
 
-Sync functions run on a worker thread and are *abandoned* (not killed) on timeout. This is documented and deliberate, and still usually what you want at a system boundary. The worker sees the caller's `contextvars`, and a `TimeoutError` raised by your own code passes through untouched.
+Sync functions run on a worker thread and are *abandoned* (not killed) on timeout. This is documented and deliberate, and still usually what you want at a system boundary. The worker sees the caller's `contextvars`, and a `TimeoutError` raised by your own code passes through untouched. Abandoned workers are capped (`max_abandoned=64` per policy): once that many timed-out calls are still running, new calls fail fast instead of piling up threads behind a hung dependency. `async with timeout(2.0).guard():` bounds a block of async code.
 
 ### `rate_limit`: be a good client
 
@@ -114,7 +141,7 @@ rl = rate_limit(90, per=60.0, burst=10)   # 90 calls/min, bursts of 10
 async def embed(text): ...
 ```
 
-Token bucket; throttled calls **wait** by default (roughly FIFO). Set `max_wait` to fail fast with `RateLimited` instead.
+Token bucket; throttled calls **wait** by default (roughly FIFO), and a waiter that is cancelled gives its token back. Set `max_wait` to fail fast with `RateLimited` instead. `rl.available_tokens` shows the bucket; `with rl.guard():` takes a token for a block.
 
 ### `bulkhead`: contain the blast radius
 
@@ -124,6 +151,8 @@ bh = bulkhead(20, max_wait=0)   # at most 20 in flight, reject the 21st
 @bh
 async def render_report(): ...
 ```
+
+`bh.in_flight` reports current usage; `with bh.guard():` / `async with bh.guard():` holds a slot for a block. Capacity is counted separately for sync callers and for each event loop.
 
 ### `fallback`: degrade, don't die
 
@@ -139,7 +168,7 @@ async def recommendations(user): ...
 async def complete(prompt): ...   # if slow after 800ms, race a duplicate call
 ```
 
-The first success wins; losers are cancelled ("The Tail at Scale"). For idempotent async calls only.
+The first success wins; losers are cancelled ("The Tail at Scale"). For idempotent async calls only. Pass `on=` with your transient errors so a permanent failure (a 400) propagates at once instead of being raced `max_hedges` more times.
 
 ### `adaptive_rate_limit`: find the server's real limit
 
@@ -161,17 +190,85 @@ def exchange_rates(base): ...
 
 Fresh values are served from memory; when a refresh *fails*, the expired value is served for up to `stale_ttl` more seconds instead of the error. Refreshes are single-flight: a hundred concurrent misses on one key make one call to the dependency, not a hundred. LRU-bounded, per-arguments keying, injectable clock.
 
+### `deadline`: one time budget for the whole operation
+
+A timeout bounds one call; a deadline bounds everything inside a block, however many retries, waits and nested calls it takes:
+
+```python
+from nopanic import deadline, time_remaining
+
+async with deadline(5.0):
+    profile = await get_profile(uid)    # retries, timeouts, rate-limit waits...
+    orders = await get_orders(uid)      # ...all share the same 5 seconds
+```
+
+Policies inside cooperate: `timeout` clamps to the time remaining, `retry` gives up instead of sleeping past it, and `rate_limit` / `bulkhead` reject instead of queueing past it. Nested deadlines only shorten the budget. Hand the rest to your own clients with `time_remaining()`. `deadline` is also a policy: `compose(deadline(10.0), retry(...), timeout(2.0))` gives every call its own budget.
+
+### Streams: LLM tokens, file chunks, paginated rows
+
+Decorate a generator or async generator function and the policies guard the stream:
+
+```python
+@retry(attempts=3, on=ConnectionError)
+@timeout(10.0, first_item=30.0)    # 30s to the first token, then 10s per token
+@llm_breaker                       # outcome recorded when the stream ends
+async def stream_completion(prompt):
+    async for token in client.stream(prompt):
+        yield token
+```
+
+`retry` re-opens a stream that fails *before* its first item; once items were delivered, a failure propagates (they cannot be taken back). `timeout` bounds each item, never the consumer's own time between items. `circuit_breaker`, `bulkhead`, `rate_limit` and `adaptive_rate_limit` treat the whole stream as one call. Policies that cannot guard a stream (`cache`, `fallback`, `hedge`, `deadline`, and `timeout` on a *sync* generator) raise `TypeError` at decoration time instead of silently doing nothing. Close async streams you abandon early (`contextlib.aclosing`), as with any async generator.
+
+### `keyed`: one policy per host, tenant or model
+
+```python
+from urllib.parse import urlsplit
+from nopanic import keyed, circuit_breaker
+
+per_host = keyed(
+    lambda host: circuit_breaker(name=f"api-{host}", reset_timeout=10.0),
+    key=lambda url, **_: urlsplit(url).hostname,
+)
+
+@per_host
+async def fetch(url, **params): ...
+
+per_host.get("eu.api.example.com").state
+```
+
+One region going down no longer trips the breaker for every region; one noisy tenant no longer starves the others' rate limit. Instances are created on first use and LRU-bounded (`maxsize`).
+
 ## Observability: one stream for everything
 
 ```python
+import logging
 from nopanic import events
 
-cancel = events.subscribe(
-    lambda e: log.info("%s name=%s %s", e.kind, e.name, dict(e.data))
+events.log_to(logging.getLogger("resilience"))     # one line per event
+
+cancel = events.subscribe(                         # or anything custom
+    lambda e: metrics.increment(e.kind, tags={"name": e.name, "fn": e.function})
 )
 ```
 
-Every policy emits typed events (`retry.attempt_failed`, `breaker.state_change`, `ratelimit.throttled`, `cache.stale_served`, ...). A listener is all it takes to wire OpenTelemetry, StatsD or metrics counters; listeners can never break the calls they observe, and with no listeners the overhead is a single attribute read.
+Every policy emits typed events (`retry.attempt_failed`, `breaker.state_change`, `ratelimit.throttled`, `cache.stale_served`, ...), each carrying the policy's `name` and the guarded `function`. A listener is all it takes to wire OpenTelemetry, StatsD or metrics counters; listeners can never break the calls they observe, and with no listeners the overhead is a single attribute read. For dashboards and health checks, read state directly: `breaker.metrics`, `bulkhead.in_flight`, `rate_limit.available_tokens`, `adaptive_rate_limit.current_rate`, `timeout.abandoned`, `cache.size`, `RetryBudget.available`.
+
+## Testing code that uses nopanic
+
+```python
+from nopanic import testing
+
+def test_checkout_survives_a_flaky_gateway():
+    with testing.instant() as sleeps:             # no real backoff or queueing
+        assert checkout(order) == "paid"
+    assert len(sleeps) == 2
+
+def test_breaker_reports_opening():
+    with testing.capture_events("breaker.") as seen:
+        ...
+```
+
+Stateful policies also take an injectable `clock=` for fully deterministic tests.
 
 ## Composition: the whole point
 
@@ -229,15 +326,15 @@ def get_json(url):
 - **Sync and async are equals.** One API; the wrapper flavour is chosen at decoration time, not per call.
 - **No wrapper exceptions.** Your `except ConnectionError:` keeps working; policies only add their own precise signals (`CircuitOpen`, `BulkheadFull`, `RateLimited`).
 - **Composition over configuration.** Small orthogonal policies + `compose`, instead of one mega-object with 40 kwargs.
-- **Testable time.** Breakers and rate limiters take an injectable `clock`, so your test suite never sleeps.
+- **Testable time.** Breakers and rate limiters take an injectable `clock`, and `nopanic.testing.instant()` skips every wait, so your test suite never sleeps.
+- **Fail loudly at decoration time.** A policy that cannot guard what you decorated (a stream, a sync function for `hedge`) says so immediately.
 
 ## Roadmap
 
 - OpenTelemetry helper package on top of `events` (spans + metrics)
-- Live metrics snapshots (`breaker.metrics`, bulkhead in-flight count) for health checks
-- Slow-call rate as a breaker trip condition
-- Per-key policies (one breaker or limiter per host or tenant)
 - Trio/AnyIO support
+- Pluggable shared state (e.g. Redis) for breakers and rate limits across processes, as a separate package
+- Documentation site and integration guides (httpx, FastAPI, OpenAI/Anthropic SDKs)
 
 ## Performance
 
@@ -263,6 +360,8 @@ For scale: a fast HTTP round trip costs 5,000+ us, an LLM call millions. Numbers
 - Server-controlled delays are capped: a hostile `Retry-After: 999999999` cannot park your client (`retry_after_cap` on `retry`, `max_block` on `adaptive_rate_limit`, both defaulting to 60s).
 - `hedge` cancels **and reaps** losing attempts, leaving no orphaned tasks and no "exception was never retrieved" noise.
 - Under untrusted load, set `max_wait` on `rate_limit`/`bulkhead` so backpressure becomes fast failure instead of unbounded queueing.
+- A hung dependency cannot exhaust threads through sync `timeout`: abandoned workers are capped (`max_abandoned`), beyond which calls fail fast.
+- `RetryBudget` bounds retry amplification, so your clients cannot turn a partial outage into a self-inflicted one.
 
 Vulnerability reports: see [SECURITY.md](SECURITY.md). Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 

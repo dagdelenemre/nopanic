@@ -87,10 +87,12 @@ class cache(Policy):
             others wait for and receive its outcome (value, stale value or
             the same exception). Sync and async callers are deduplicated
             separately, async ones per event loop.
+        name: Diagnostic name carried by this policy's events.
         clock: Monotonic time source; injectable for tests.
 
     One instance may decorate several functions; entries are keyed per
-    function. Arguments must be hashable unless ``key`` is given.
+    function. Arguments must be hashable unless ``key`` is given. Streams
+    (generator functions) cannot be cached and are rejected at decoration.
     """
 
     __slots__ = (
@@ -101,6 +103,7 @@ class cache(Policy):
         "_lock",
         "_sync_flights",
         "maxsize",
+        "name",
         "on",
         "single_flight",
         "stale_ttl",
@@ -116,6 +119,7 @@ class cache(Policy):
         maxsize: int = 1024,
         key: Callable[..., Hashable] | None = None,
         single_flight: bool = True,
+        name: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if maxsize < 1:
@@ -125,6 +129,7 @@ class cache(Policy):
         self.on = on
         self.maxsize = maxsize
         self.single_flight = single_flight
+        self.name = name
         self._key = key
         self._clock = clock
         self._lock = threading.Lock()
@@ -133,6 +138,12 @@ class cache(Policy):
         # key -> refresh in progress (single-flight bookkeeping).
         self._sync_flights: dict[Hashable, _SyncFlight] = {}
         self._async_flights: dict[Hashable, _AsyncFlight] = {}
+
+    @property
+    def size(self) -> int:
+        """Entries currently cached (fresh or stale)."""
+        with self._lock:
+            return len(self._entries)
 
     def clear(self) -> None:
         """Drop every cached entry."""
@@ -163,14 +174,14 @@ class cache(Policy):
             while len(self._entries) > self.maxsize:
                 self._entries.popitem(last=False)
 
-    def _serve_stale(self, key: Hashable, exc: Exception) -> Any:
+    def _serve_stale(self, fn: Callable[..., Any], key: Hashable, exc: Exception) -> Any:
         """Return the stale value, or re-raise *exc* when none is usable."""
         if not exc_matches(exc, self.on):
             raise exc
         value, age = self._lookup(key)
         if value is _MISS or age > self.ttl + self.stale_ttl:
             raise exc
-        emit("cache.stale_served", "cache", age=age, exception=exc)
+        emit("cache.stale_served", "cache", self.name, fn, age=age, exception=exc)
         return value
 
     def _join(
@@ -191,7 +202,7 @@ class cache(Policy):
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:
-            return self._serve_stale(key, exc)
+            return self._serve_stale(fn, key, exc)
         self._store(key, result)
         return result
 
@@ -201,7 +212,7 @@ class cache(Policy):
         try:
             result = await fn(*args, **kwargs)
         except Exception as exc:
-            return self._serve_stale(key, exc)
+            return self._serve_stale(fn, key, exc)
         self._store(key, result)
         return result
 
