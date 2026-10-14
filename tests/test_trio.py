@@ -20,6 +20,9 @@ from nopanic.testing import instant
 
 trio = pytest.importorskip("trio")
 
+# Same-tick reads give (m + s) - m, which float rounding can put a hair above s.
+EPS = 1e-9
+
 
 class DatabaseTimeout(TimeoutError):
     pass
@@ -226,7 +229,7 @@ def test_deadline_under_trio():
 
     async def scenario():
         async with deadline(0.05):
-            assert 0 < time_remaining() <= 0.05
+            assert 0 < time_remaining() <= 0.05 + EPS
             await slow()
 
     with pytest.raises(TimeoutError):

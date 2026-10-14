@@ -19,6 +19,9 @@ from nopanic import (
 )
 from nopanic.testing import capture_events
 
+# Same-tick reads give (m + s) - m, which float rounding can put a hair above s.
+EPS = 1e-9
+
 
 def test_time_remaining_is_none_outside_a_deadline():
     assert time_remaining() is None
@@ -28,9 +31,9 @@ def test_nested_deadlines_only_shorten_the_budget():
     with deadline(10.0):
         outer = time_remaining()
         with deadline(60.0):
-            assert time_remaining() <= outer  # cannot extend
+            assert time_remaining() <= outer + EPS  # cannot extend
         with deadline(1.0):
-            assert time_remaining() <= 1.0
+            assert time_remaining() <= 1.0 + EPS
         assert time_remaining() == pytest.approx(outer, abs=0.5)
     assert time_remaining() is None
 
@@ -92,7 +95,7 @@ def test_sync_timeout_worker_sees_the_deadline():
         return time_remaining()
 
     with deadline(2.0):
-        assert 0 < report() <= 2.0
+        assert 0 < report() <= 2.0 + EPS
 
 
 def test_rate_limit_rejects_waits_that_outlast_the_deadline(clock):
@@ -139,7 +142,7 @@ def test_deadline_as_a_policy_gives_each_call_its_own_budget():
 
     report()
     report()
-    assert all(0 < r <= 3.0 for r in seen)
+    assert all(0 < r <= 3.0 + EPS for r in seen)
     assert time_remaining() is None
 
 
@@ -148,7 +151,7 @@ def test_async_deadline_policy():
     async def report():
         return time_remaining()
 
-    assert 0 < asyncio.run(report()) <= 2.0
+    assert 0 < asyncio.run(report()) <= 2.0 + EPS
 
 
 def test_validation():
