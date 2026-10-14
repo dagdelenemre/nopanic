@@ -13,3 +13,4 @@ venv/
 htmlcov/
 .claude/
 temporarytest/
+site/

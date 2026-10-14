@@ -1,0 +1,88 @@
+site_name: nopanic
+site_description: The unified resilience toolkit for Python. Zero dependencies, sync + async, one decorator API.
+site_url: https://dagdelenemre.github.io/nopanic/
+repo_url: https://github.com/dagdelenemre/nopanic
+repo_name: dagdelenemre/nopanic
+edit_uri: edit/main/docs/
+copyright: MIT licensed. Copyright Emre Kadir Dağdelen.
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            members_order: source
+            docstring_style: google
+            filters: ["!^_"]
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Policies:
+      - retry: policies/retry.md
+      - circuit_breaker: policies/circuit-breaker.md
+      - timeout: policies/timeout.md
+      - rate_limit and adaptive_rate_limit: policies/rate-limit.md
+      - bulkhead: policies/bulkhead.md
+      - fallback: policies/fallback.md
+      - hedge: policies/hedge.md
+      - cache: policies/cache.md
+      - deadline: policies/deadline.md
+      - RetryBudget: policies/retry-budget.md
+      - keyed: policies/keyed.md
+  - Concepts:
+      - Composition: composition.md
+      - Streams: streams.md
+      - asyncio, Trio and AnyIO: async-backends.md
+      - Observability: observability.md
+      - Testing: testing.md
+      - Across processes (Redis): distributed.md
+      - Writing your own policy: extending.md
+  - Guides:
+      - HTTP with httpx and requests: guides/http.md
+      - FastAPI: guides/fastapi.md
+      - LLM SDKs (Anthropic, OpenAI): guides/llm-sdks.md
+  - Reference:
+      - API: api.md
+      - Changelog: changelog.md

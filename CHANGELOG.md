@@ -3,8 +3,9 @@
 ## 0.3.0 (2026-10-14)
 
 Correctness fixes found in a full review, streaming support, retry
-budgets, deadline propagation, per-key policies, live metrics and test
-helpers. Upgrading is recommended for everyone using `circuit_breaker`
+budgets, deadline propagation, per-key policies, live metrics, test
+helpers, Trio/AnyIO support, a public extension API, two add-on packages
+(`nopanic-otel`, `nopanic-redis`) and a documentation site. Upgrading is recommended for everyone using `circuit_breaker`
 with async code or `timeout` on Python 3.11+.
 
 Fixes:
@@ -90,6 +91,23 @@ Observability and ergonomics:
   `capture_events()` collects events, so test suites never sleep.
 - Bulkhead documentation now states that sync callers and each event loop
   get separate capacity.
+
+Ecosystem:
+
+- Trio support (and therefore AnyIO on either backend): every async policy
+  detects the running library per call, with no configuration and no new
+  dependency. Under Trio, `hedge` races on a nursery and raises the original
+  exception, never an `ExceptionGroup`.
+- `nopanic.extend`: the public building blocks for writing your own
+  policies (`Policy`, `emit`, `sleep`/`asleep`, `time_remaining`,
+  validation helpers). The add-on packages are built only on it.
+- New package `nopanic-otel` 0.1.0: OpenTelemetry counters, histograms and
+  span events for every event, plus observable gauges for live state.
+- New package `nopanic-redis` 0.1.0: circuit breakers and rate limits
+  shared across processes and hosts through Redis.
+- Documentation site (MkDocs) with a page per policy, concepts, and
+  integration guides for httpx/requests, FastAPI and the Anthropic and
+  OpenAI SDKs; published to GitHub Pages from CI.
 
 Other new:
 

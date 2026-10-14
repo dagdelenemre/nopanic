@@ -35,6 +35,59 @@ jobs:
           python-version: "3.12"
       - run: pip install -e .[dev]
       - run: mypy src
+      - name: type-check the add-on packages
+        run: |
+          pip install -e packages/nopanic-otel -e packages/nopanic-redis
+          mypy --strict --python-version 3.10 packages/nopanic-otel/src packages/nopanic-redis/src
+
+  # The add-on packages, tested against the core in this checkout.
+  otel:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e . -e "packages/nopanic-otel[dev]"
+      - run: pytest -q packages/nopanic-otel/tests
+
+  redis:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 2s --health-retries 15
+    env:
+      # Also run every test against a real server, not only fakeredis.
+      NOPANIC_REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e . -e "packages/nopanic-redis[dev]"
+      - run: pytest -q packages/nopanic-redis/tests
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -r docs/requirements.txt -e .
+      - run: mkdocs build --strict
 
   audit:
     runs-on: ubuntu-latest

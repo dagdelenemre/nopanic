@@ -1,0 +1,4 @@
+# Docs build only; never a runtime dependency of nopanic.
+mkdocs>=1.6,<2
+mkdocs-material>=9.6,<10
+mkdocstrings[python]>=0.29

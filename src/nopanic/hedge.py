@@ -13,6 +13,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from . import _core
 from ._core import ExcFilter, Policy, exc_matches, positive_int, positive_number
 from .events import emit
 
@@ -60,6 +61,18 @@ class hedge(Policy):
     async def _run_async(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
+        if _core.running_trio():
+            from . import _trio
+
+            return await _trio.race(
+                fn,
+                args,
+                kwargs,
+                delay=self.delay,
+                max_hedges=self.max_hedges,
+                transient=lambda exc: exc_matches(exc, self.on),
+                on_launch=lambda delay: emit("hedge.launched", "hedge", self.name, fn, delay=delay),
+            )
         tasks: set[asyncio.Task[Any]] = {asyncio.ensure_future(fn(*args, **kwargs))}
         hedges_left = self.max_hedges
         last_exc: BaseException | None = None

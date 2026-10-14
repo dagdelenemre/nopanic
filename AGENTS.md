@@ -17,7 +17,15 @@ Layout: one policy per module in `src/nopanic/`; shared machinery in
 numeric validation, the ambient deadline, the sleep hook used by
 `testing.instant()`); the bucketed counter window in `_window.py`;
 observability in `events.py`; test helpers for users in `testing.py`;
-tests mirror modules in `tests/` (streams in `tests/test_streams.py`).
+the public toolkit for policy authors in `extend.py`; Trio primitives in
+`_trio.py` (imported only when running under trio); tests mirror modules
+in `tests/` (streams in `tests/test_streams.py`, Trio in `tests/test_trio.py`).
+
+Add-on packages live in `packages/nopanic-otel` and `packages/nopanic-redis`:
+separate PyPI projects with their own version, CHANGELOG and tests, built
+only on the public API (`nopanic`, `nopanic.events`, `nopanic.extend`).
+The documentation site is `docs/` + `mkdocs.yml` (MkDocs Material,
+published to GitHub Pages by `.github/workflows/docs.yml`).
 
 ## Commands
 
@@ -27,14 +35,19 @@ ruff check .              # lint (includes flake8-bandit security rules)
 mypy src                  # strict typing, must stay clean
 pytest -q                 # full suite, must stay under ~5s
 python benchmarks/bench.py  # hot-path overhead; keep policies ~1us/call
+pytest -q packages/nopanic-otel/tests packages/nopanic-redis/tests  # add-ons
+mkdocs build --strict     # docs (pip install -r docs/requirements.txt)
 ```
 
-CI runs all of this on 3 OSes x Python 3.10-3.14 plus `pip-audit` and a
-`python -O` import check.
+CI runs all of this on 3 OSes x Python 3.10-3.14 plus `pip-audit`, a
+`python -O` import check, the add-on packages (Redis against a real server)
+and a strict docs build.
 
 ## Invariants (do not break these)
 
 1. **Zero runtime dependencies.** Nothing gets added to `[project.dependencies]`.
+   Third-party integrations go in a package under `packages/`. The core never
+   imports trio itself; it only uses it when the application is running it.
 2. **Sync/async parity.** Every policy implements `_run_sync` and
    `_run_async` with identical semantics. Documented exceptions: `hedge` is
    async-only; sync `timeout` abandons its worker thread (capped by
@@ -79,7 +92,7 @@ Commit messages: short imperative subject, no AI attribution trailers.
 ## Releases
 
 Versions are bumped in `pyproject.toml` AND `src/nopanic/__init__.py`
-together. Docs-only changes do not bump the version. Build with
+together (for an add-on: its `pyproject.toml` and its `__version__`). Docs-only changes do not bump the version. Build with
 `python -m build`, verify with `twine check dist/*` and inspect the sdist
 file list for leaks before uploading. The maintainer uploads to PyPI and
 tags `vX.Y.Z` on the released commit.

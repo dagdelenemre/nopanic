@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nopanic-redis"
+version = "0.1.0"
+description = "Redis-backed circuit breakers and rate limits for nopanic, shared across processes and hosts."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Emre Kadir Dağdelen", email = "dagdelen.cyber@gmail.com" }]
+keywords = ["nopanic", "redis", "distributed", "circuit-breaker", "rate-limit", "resilience"]
+dependencies = ["nopanic>=0.3.0", "redis>=5"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/dagdelenemre/nopanic"
+Repository = "https://github.com/dagdelenemre/nopanic"
+Issues = "https://github.com/dagdelenemre/nopanic/issues"
+Changelog = "https://github.com/dagdelenemre/nopanic/blob/main/packages/nopanic-redis/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "fakeredis[lua]>=2.20"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nopanic_redis"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

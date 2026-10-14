@@ -9,7 +9,7 @@ import sys
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from types import TracebackType
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, cast
 
 from . import _core
 from ._core import Policy, fn_name, positive_int, positive_number
@@ -180,9 +180,21 @@ class timeout(Policy):
             raise state.error
         return state.result
 
+    async def _await_within(
+        self, awaitable: Awaitable[T], seconds: float, fn: Callable[..., Any] | None
+    ) -> T:
+        if _core.running_trio():
+            from . import _trio
+
+            expired, result = await _trio.await_within(awaitable, seconds)
+            if expired:
+                raise self._expired(fn, seconds)
+            return cast(T, result)
+        return await self._await_within_asyncio(awaitable, seconds, fn)
+
     if sys.version_info >= (3, 11):
 
-        async def _await_within(
+        async def _await_within_asyncio(
             self, awaitable: Awaitable[T], seconds: float, fn: Callable[..., Any] | None
         ) -> T:
             # asyncio.timeout runs in the caller's own task (no extra task,
@@ -200,7 +212,7 @@ class timeout(Policy):
 
     else:
 
-        async def _await_within(
+        async def _await_within_asyncio(
             self, awaitable: Awaitable[T], seconds: float, fn: Callable[..., Any] | None
         ) -> T:
             try:
@@ -234,7 +246,7 @@ class timeout(Policy):
 class _TimeoutGuard:
     """One bounded async block; a fresh object per ``guard()``."""
 
-    __slots__ = ("_fired", "_handle", "_policy", "_scope", "_seconds")
+    __slots__ = ("_fired", "_handle", "_policy", "_scope", "_seconds", "_trio_scope")
 
     def __init__(self, policy: timeout) -> None:
         self._policy = policy
@@ -242,6 +254,7 @@ class _TimeoutGuard:
         self._scope: Any = None
         self._handle: asyncio.TimerHandle | None = None
         self._fired = False
+        self._trio_scope: Any = None
 
     def __enter__(self) -> _TimeoutGuard:
         raise TypeError(
@@ -253,7 +266,12 @@ class _TimeoutGuard:
 
     async def __aenter__(self) -> _TimeoutGuard:
         self._seconds = self._policy._limit(None, self._policy.seconds)
-        if sys.version_info >= (3, 11):
+        if _core.running_trio():
+            from . import _trio
+
+            self._trio_scope = _trio.open_scope(self._seconds)
+            self._trio_scope.__enter__()
+        elif sys.version_info >= (3, 11):
             self._scope = asyncio.timeout(self._seconds)
             await self._scope.__aenter__()
         else:
@@ -273,7 +291,12 @@ class _TimeoutGuard:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
-    ) -> None:
+    ) -> bool | None:
+        if self._trio_scope is not None:
+            swallowed = bool(self._trio_scope.__exit__(exc_type, exc, tb))
+            if self._trio_scope.cancelled_caught:
+                raise self._policy._expired(None, self._seconds) from exc
+            return swallowed
         if self._scope is not None:
             try:
                 await self._scope.__aexit__(exc_type, exc, tb)
@@ -281,8 +304,9 @@ class _TimeoutGuard:
                 if self._scope.expired():
                     raise self._policy._expired(None, self._seconds) from error
                 raise
-            return
+            return None
         if self._handle is not None:
             self._handle.cancel()
         if self._fired and isinstance(exc, asyncio.CancelledError):
             raise self._policy._expired(None, self._seconds) from exc
+        return None

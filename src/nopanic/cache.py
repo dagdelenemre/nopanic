@@ -58,11 +58,42 @@ class _SyncFlight(_Flight):
 
 
 class _AsyncFlight(_Flight):
-    __slots__ = ("done",)
+    """Async flight bound to the running event loop (asyncio) or trio run.
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    ``owner`` identifies that loop/run: a caller from another one cannot
+    await this flight and refreshes on its own instead.
+    """
+
+    __slots__ = ("_signal", "owner")
+
+    def __init__(self) -> None:
         super().__init__()
-        self.done: asyncio.Future[None] = loop.create_future()
+        self._signal: Any
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            from . import _trio
+
+            self.owner: object = _trio.current_token()
+            self._signal = _trio.new_event()
+        else:
+            self.owner = loop
+            self._signal = loop.create_future()
+
+    async def wait(self) -> None:
+        signal = self._signal
+        if isinstance(signal, asyncio.Future):
+            # shield: a follower giving up must not cancel the shared signal.
+            await asyncio.shield(signal)
+        else:
+            await signal.wait()  # trio.Event: waiting never affects the event
+
+    def finish(self) -> None:
+        signal = self._signal
+        if isinstance(signal, asyncio.Future):
+            signal.set_result(None)
+        else:
+            signal.set()
 
 
 _FlightT = TypeVar("_FlightT", bound=_Flight)
@@ -86,7 +117,7 @@ class cache(Policy):
             key share one refresh: a single caller runs the function and the
             others wait for and receive its outcome (value, stale value or
             the same exception). Sync and async callers are deduplicated
-            separately, async ones per event loop.
+            separately, async ones per event loop (or trio run).
         name: Diagnostic name carried by this policy's events.
         clock: Monotonic time source; injectable for tests.
 
@@ -254,16 +285,14 @@ class cache(Policy):
             return value
         if not self.single_flight:
             return await self._refresh_async(fn, args, kwargs, key)
-        loop = asyncio.get_running_loop()
-        mine = _AsyncFlight(loop)
+        mine = _AsyncFlight()
         flight = self._join(self._async_flights, key, mine)
         if flight is not mine:
-            if flight.done.get_loop() is not loop:
+            if flight.owner is not mine.owner:
                 # The running refresh belongs to another event loop and cannot
                 # be awaited from here: refresh independently.
                 return await self._refresh_async(fn, args, kwargs, key)
-            # shield: a follower giving up must not cancel the shared signal.
-            await asyncio.shield(flight.done)
+            await flight.wait()
             if flight.abandoned:
                 return await self._refresh_async(fn, args, kwargs, key)
             return flight.outcome()
@@ -277,5 +306,5 @@ class cache(Policy):
             raise
         finally:
             self._land(self._async_flights, key, mine)
-            mine.done.set_result(None)
+            mine.finish()
         return mine.value

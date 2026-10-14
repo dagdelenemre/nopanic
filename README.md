@@ -46,7 +46,16 @@ These patterns only pay off when they **compose**: a timeout per attempt, retrie
 pip install nopanic
 ```
 
-Python 3.10+. No dependencies. Fully typed (`py.typed`).
+Python 3.10+. No dependencies. Fully typed (`py.typed`). Works on asyncio, Trio and AnyIO.
+
+**Documentation:** [dagdelenemre.github.io/nopanic](https://dagdelenemre.github.io/nopanic/), with integration guides for [httpx/requests](https://dagdelenemre.github.io/nopanic/guides/http/), [FastAPI](https://dagdelenemre.github.io/nopanic/guides/fastapi/) and [LLM SDKs](https://dagdelenemre.github.io/nopanic/guides/llm-sdks/).
+
+Optional add-ons, each a separate package so the core stays dependency-free:
+
+| Package | Adds |
+| --- | --- |
+| [`nopanic-otel`](https://github.com/dagdelenemre/nopanic/tree/main/packages/nopanic-otel) | OpenTelemetry metrics, span events and live gauges |
+| [`nopanic-redis`](https://github.com/dagdelenemre/nopanic/tree/main/packages/nopanic-redis) | Circuit breakers and rate limits shared across processes and hosts |
 
 ## The toolkit
 
@@ -251,7 +260,7 @@ cancel = events.subscribe(                         # or anything custom
 )
 ```
 
-Every policy emits typed events (`retry.attempt_failed`, `breaker.state_change`, `ratelimit.throttled`, `cache.stale_served`, ...), each carrying the policy's `name` and the guarded `function`. A listener is all it takes to wire OpenTelemetry, StatsD or metrics counters; listeners can never break the calls they observe, and with no listeners the overhead is a single attribute read. For dashboards and health checks, read state directly: `breaker.metrics`, `bulkhead.in_flight`, `rate_limit.available_tokens`, `adaptive_rate_limit.current_rate`, `timeout.abandoned`, `cache.size`, `RetryBudget.available`.
+Every policy emits typed events (`retry.attempt_failed`, `breaker.state_change`, `ratelimit.throttled`, `cache.stale_served`, ...), each carrying the policy's `name` and the guarded `function`. With [`nopanic-otel`](https://github.com/dagdelenemre/nopanic/tree/main/packages/nopanic-otel), `nopanic_otel.instrument()` turns them into OpenTelemetry metrics and span events, and `nopanic_otel.observe(...)` exports live policy state as gauges. A listener is all it takes to wire OpenTelemetry, StatsD or metrics counters; listeners can never break the calls they observe, and with no listeners the overhead is a single attribute read. For dashboards and health checks, read state directly: `breaker.metrics`, `bulkhead.in_flight`, `rate_limit.available_tokens`, `adaptive_rate_limit.current_rate`, `timeout.abandoned`, `cache.size`, `RetryBudget.available`.
 
 ## Testing code that uses nopanic
 
@@ -269,6 +278,27 @@ def test_breaker_reports_opening():
 ```
 
 Stateful policies also take an injectable `clock=` for fully deterministic tests.
+
+## asyncio, Trio and AnyIO
+
+Every async policy runs on asyncio and Trio, and so on AnyIO with either backend, with nothing to configure: nopanic detects the running library per call and never imports trio itself. Cancellation is never a failure: a cancelled breaker probe frees its slot, a cancelled rate-limit waiter returns its token, and `hedge` under Trio raises the original exception, never an `ExceptionGroup`.
+
+## Across processes: `nopanic-redis`
+
+```python
+import redis
+from nopanic_redis import redis_circuit_breaker, redis_rate_limit
+
+r = redis.Redis()
+payments = redis_circuit_breaker(r, name="payments", reset_timeout=15.0)   # trips fleet-wide
+openai_quota = redis_rate_limit(r, name="openai", rate=500, per=60.0)      # one shared quota
+```
+
+Atomic Lua scripts, sync and asyncio clients, fail-open when Redis itself is down. See the [distributed guide](https://dagdelenemre.github.io/nopanic/distributed/).
+
+## Writing your own policy
+
+`nopanic.extend` exposes the building blocks the built-in policies and the add-ons are made of (`Policy`, `emit`, deadline-aware and test-skippable `sleep` / `asleep`, validation helpers). Subclass `Policy`, implement `_run_sync` and `_run_async`, and your policy decorates, composes and reports events like the built-in ones.
 
 ## Composition: the whole point
 
@@ -331,10 +361,9 @@ def get_json(url):
 
 ## Roadmap
 
-- OpenTelemetry helper package on top of `events` (spans + metrics)
-- Trio/AnyIO support
-- Pluggable shared state (e.g. Redis) for breakers and rate limits across processes, as a separate package
-- Documentation site and integration guides (httpx, FastAPI, OpenAI/Anthropic SDKs)
+- More integration guides (Django, Celery, gRPC)
+- More shared-state backends for `nopanic-redis`-style policies (e.g. PostgreSQL)
+- Prometheus exporter alongside `nopanic-otel`
 
 ## Performance
 

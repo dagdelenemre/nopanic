@@ -18,6 +18,7 @@ import contextlib
 import functools
 import inspect
 import math
+import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
@@ -101,6 +102,30 @@ def time_remaining() -> float | None:
     return deadline - time.monotonic()
 
 
+# -- async backend ------------------------------------------------------------------
+
+
+def running_trio() -> bool:
+    """True when called from inside ``trio.run`` (or AnyIO's trio backend).
+
+    asyncio is checked first and costs one C call; trio is only consulted
+    when no asyncio loop is running, and only if the application imported
+    it. nopanic never imports trio on its own.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        trio = sys.modules.get("trio")
+        if trio is None:
+            return False
+        try:
+            trio.lowlevel.current_task()
+        except RuntimeError:
+            return False
+        return True
+    return False
+
+
 # -- sleeping (patched by nopanic.testing) ------------------------------------------
 
 # When not None, waits are recorded here and skipped (nopanic.testing.instant).
@@ -119,9 +144,11 @@ async def asleep(seconds: float) -> None:
     recorded = _recorded_sleeps
     if recorded is not None:
         recorded.append(seconds)
-        await asyncio.sleep(0)  # still yield: instant, not synchronous
-        return
-    await asyncio.sleep(seconds)
+        seconds = 0.0  # still yield: instant, not synchronous
+    if running_trio():
+        await sys.modules["trio"].sleep(seconds)
+    else:
+        await asyncio.sleep(seconds)
 
 
 def fn_name(fn: Callable[..., Any]) -> str:

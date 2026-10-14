@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nopanic-otel"
+version = "0.1.0"
+description = "OpenTelemetry metrics, span events and live gauges for nopanic resilience policies."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Emre Kadir Dağdelen", email = "dagdelen.cyber@gmail.com" }]
+keywords = ["nopanic", "opentelemetry", "otel", "resilience", "circuit-breaker", "retry", "metrics", "tracing"]
+dependencies = ["nopanic>=0.3.0", "opentelemetry-api>=1.20"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/dagdelenemre/nopanic"
+Repository = "https://github.com/dagdelenemre/nopanic"
+Issues = "https://github.com/dagdelenemre/nopanic/issues"
+Changelog = "https://github.com/dagdelenemre/nopanic/blob/main/packages/nopanic-otel/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "opentelemetry-sdk>=1.20"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nopanic_otel"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

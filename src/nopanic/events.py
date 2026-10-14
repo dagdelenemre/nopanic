@@ -133,7 +133,13 @@ def emit(
     /,
     **data: Any,
 ) -> None:
-    """Deliver an event to all listeners; used internally by policies."""
+    """Deliver an event to all listeners.
+
+    Used by every policy, and public for policy authors via
+    :mod:`nopanic.extend`. *name* is the policy instance's name, *fn* the
+    guarded callable (its qualified name is computed only when someone is
+    listening); keyword arguments become ``Event.data``.
+    """
     listeners = _listeners
     if not listeners:
         return

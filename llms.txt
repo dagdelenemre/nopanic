@@ -1,6 +1,6 @@
 # nopanic
 
-> Zero-dependency Python resilience toolkit: retry, circuit breaker, timeout, rate limit, bulkhead, fallback, hedged requests, retry budgets, deadlines and per-key policies as composable decorators. One API, identical for sync (`def`) and async (`async def`) functions, and for generator / async generator functions (streams). Python 3.10+, fully typed (`py.typed`), MIT license.
+> Zero-dependency Python resilience toolkit: retry, circuit breaker, timeout, rate limit, bulkhead, fallback, hedged requests, retry budgets, deadlines and per-key policies as composable decorators. One API, identical for sync (`def`) and async (`async def`) functions, and for generator / async generator functions (streams). Async works on asyncio, Trio and AnyIO. Python 3.10+, fully typed (`py.typed`), MIT license. Docs: https://dagdelenemre.github.io/nopanic/
 
 Install: `pip install nopanic`
 
@@ -98,6 +98,19 @@ One policy instance per key: `key(*args, **kwargs) -> hashable` picks it, `facto
 - `with testing.instant() as sleeps:` skips every wait nopanic would sleep (retry backoff, rate-limit queues; sync and async) and records the requested seconds. Timeouts are unaffected.
 - `with testing.capture_events(prefix="") as seen:` collects events whose kind starts with prefix.
 - Both are process-wide for the block's duration.
+
+### Async backends
+
+asyncio and Trio are both supported (so AnyIO with either backend), detected per call; nothing to configure, trio is never imported by nopanic itself. Under Trio: waits use `trio.sleep`, `timeout` uses a cancel scope, `bulkhead` keeps one `trio.Semaphore` per `trio.run`, cache single-flight uses `trio.Event`, `hedge` races on a nursery and raises the ORIGINAL exception (never an ExceptionGroup). Cancellation (`CancelledError` / `trio.Cancelled`) is never recorded as a failure.
+
+### nopanic.extend (writing your own policy)
+
+Public building blocks: `Policy` (implement `_run_sync` and `_run_async`; optional `_run_sync_gen` / `_run_async_gen` with `_STREAMS = frozenset({"sync", "async"})`), `emit(kind, policy, name, fn, **data)`, `sleep(seconds)` / `asleep(seconds)` (skippable by `testing.instant()`, backend-aware), `time_remaining()`, `running_trio()`, `exc_matches`, `ExcFilter`, `positive_number`, `positive_int`, `finite_hint`, `fn_name`. Rules: re-raise user exceptions unchanged, no locks around user code, wait only via sleep/asleep and never past time_remaining(), cancellation is no outcome.
+
+### Add-on packages (separate installs)
+
+- `pip install nopanic-otel`: `nopanic_otel.instrument(meter_provider=None, metrics_enabled=True, span_events=True) -> stop` records every event as counter `nopanic.events` (attributes nopanic.kind, nopanic.policy, nopanic.name, code.function), histograms `nopanic.retry.delay` / `nopanic.ratelimit.wait`, and events on the current span (`nopanic.<kind>`). `nopanic_otel.observe(*policies, meter_provider=None) -> stop` registers observable gauges (`nopanic.breaker.state` 0 closed/1 half_open/2 open/3 forced_open/4 disabled, `.failure_rate`, `.slow_call_rate`, `.calls`; `nopanic.bulkhead.in_flight`; `nopanic.ratelimit.available_tokens`, `nopanic.ratelimit.rate`; `nopanic.timeout.abandoned`; `nopanic.cache.size`; `nopanic.retry_budget.available`); `keyed` policies expand with attribute nopanic.key.
+- `pip install nopanic-redis`: `redis_circuit_breaker(client, *, name, failure_threshold=0.5, min_calls=5, window=30.0, window_buckets=10, reset_timeout=30.0, half_open_max_calls=1, on=Exception, prefix="nopanic", fail_open=True, clock=time.time)` and `redis_rate_limit(client, *, name, rate, per=1.0, burst=None, max_wait=None, prefix="nopanic", fail_open=True, clock=time.time)`. State lives in Redis (atomic Lua scripts), shared by every instance with the same name+prefix across processes/hosts. `redis.Redis` client = sync functions only, `redis.asyncio.Redis` = async only (TypeError otherwise). Redis unreachable: fail_open=True lets calls through and emits `breaker.store_error` / `ratelimit.store_error`; fail_open=False raises CircuitOpen / RateLimited. `breaker.get_state()` / `.reset()` (awaitable with an async client). Wall-clock time: keep hosts NTP-synced. No stream support.
 
 ## Composition semantics
 

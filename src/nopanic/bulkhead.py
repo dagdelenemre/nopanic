@@ -80,7 +80,7 @@ class bulkhead(Policy):
     ``async with bh.guard():`` (the running loop's capacity).
     """
 
-    __slots__ = ("_async_sems", "_sync_sem", "max_concurrent", "max_wait", "name")
+    __slots__ = ("_async_sems", "_sync_sem", "_trio_sems", "max_concurrent", "max_wait", "name")
 
     _STREAMS: ClassVar[frozenset[str]] = frozenset({"sync", "async"})
 
@@ -102,6 +102,9 @@ class bulkhead(Policy):
         self._async_sems: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop, asyncio.Semaphore
         ] = weakref.WeakKeyDictionary()
+        # Same idea under trio: one trio.Semaphore per trio.run, keyed by its
+        # token. Typed loosely so trio is never imported unless it runs.
+        self._trio_sems: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
     @property
     def in_flight(self) -> int:
@@ -110,6 +113,8 @@ class bulkhead(Policy):
         busy = self.max_concurrent - self._sync_sem._value
         for sem in list(self._async_sems.values()):
             busy += self.max_concurrent - sem._value
+        for trio_sem in list(self._trio_sems.values()):
+            busy += self.max_concurrent - trio_sem.value
         return busy
 
     def guard(self) -> _BulkheadGuard:
@@ -147,8 +152,12 @@ class bulkhead(Policy):
         elif limit == 0 or not self._sync_sem.acquire(timeout=limit):
             raise self._full(fn)
 
-    async def _acquire_async(self, fn: Callable[..., Any] | None) -> asyncio.Semaphore:
-        loop = asyncio.get_running_loop()
+    async def _acquire_async(self, fn: Callable[..., Any] | None) -> Any:
+        """Take an async slot; returns the semaphore to release."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return await self._acquire_trio(fn)
         sem = self._async_sems.get(loop)
         if sem is None:
             sem = asyncio.Semaphore(self.max_concurrent)
@@ -160,6 +169,21 @@ class bulkhead(Policy):
         if limit is None:
             await sem.acquire()
         elif limit == 0 or not await _acquire_within(sem, limit):
+            raise self._full(fn)
+        return sem
+
+    async def _acquire_trio(self, fn: Callable[..., Any] | None) -> Any:
+        from . import _trio
+
+        token = _trio.current_token()
+        sem = self._trio_sems.get(token)
+        if sem is None:
+            sem = _trio.new_semaphore(self.max_concurrent)
+            self._trio_sems[token] = sem
+        if _trio.try_acquire(sem):
+            return sem
+        limit = self._wait_limit()
+        if limit == 0 or not await _trio.acquire_within(sem, limit):
             raise self._full(fn)
         return sem
 
@@ -210,7 +234,7 @@ class _BulkheadGuard:
 
     def __init__(self, bh: bulkhead) -> None:
         self._bulkhead = bh
-        self._sem: asyncio.Semaphore | None = None
+        self._sem: Any = None
 
     def __enter__(self) -> _BulkheadGuard:
         self._bulkhead._acquire_sync(None)
