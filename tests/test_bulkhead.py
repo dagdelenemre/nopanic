@@ -142,3 +142,46 @@ def test_validation():
         bulkhead(0)
     with pytest.raises(ValueError):
         bulkhead(1, max_wait=-1)
+
+
+def test_async_timed_out_and_cancelled_waiters_never_leak_permits():
+    bh = bulkhead(2, max_wait=0.01)
+
+    async def scenario():
+        release = asyncio.Event()
+        entered = asyncio.Event()
+        holding = []
+
+        @bh
+        async def occupy():
+            holding.append(1)
+            if len(holding) == 2:
+                entered.set()
+            await release.wait()
+
+        @bh
+        async def quick():
+            return "in"
+
+        tasks = [asyncio.ensure_future(occupy()) for _ in range(2)]
+        await entered.wait()
+        for _ in range(20):  # waiters that expire...
+            with pytest.raises(BulkheadFull):
+                await quick()
+        waiter = asyncio.ensure_future(quick())  # ...and one that is cancelled
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        release.set()
+        await asyncio.gather(*tasks)
+        # Full capacity is back: both slots can be held at once again.
+        holding.clear()
+        entered.clear()
+        release.clear()
+        tasks = [asyncio.ensure_future(occupy()) for _ in range(2)]
+        await asyncio.wait_for(entered.wait(), timeout=5.0)
+        release.set()
+        await asyncio.gather(*tasks)
+
+    asyncio.run(scenario())

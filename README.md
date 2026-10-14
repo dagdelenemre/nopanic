@@ -65,7 +65,16 @@ def fetch(): ...
 
 On exhaustion the **original exception is re-raised**, so there is no wrapper to unwrap. Backoff strategies: `fixed`, `exponential`, `full_jitter` (default, AWS-style), `decorrelated_jitter`, or any iterable of floats.
 
-Exceptions carrying a numeric `retry_after` attribute (build one from an HTTP 429's Retry-After header, or let `CircuitOpen` provide it) raise the wait to at least that long; disable with `honor_retry_after=False`.
+Exceptions carrying a numeric `retry_after` attribute (build one from an HTTP 429's Retry-After header, or let `CircuitOpen` / `RateLimited` provide it) raise the wait to at least that long; disable with `honor_retry_after=False`.
+
+Bound the total time, not just the attempt count, and retry on bad *results* for clients that do not raise:
+
+```python
+@retry(attempts=6, max_time=20.0, on_result=lambda r: r.status_code in (429, 502, 503))
+async def get(url): return await client.get(url)
+```
+
+`max_time` never starts an attempt past the deadline; when `on_result` retries run out, the last result is returned as-is.
 
 ### `circuit_breaker`: stop hammering what's already down
 
@@ -94,7 +103,7 @@ While open, calls fail instantly with `CircuitOpen(retry_after=...)` instead of 
 async def lookup(): ...   # cancelled cleanly via the event loop
 ```
 
-Sync functions run on a worker thread and are *abandoned* (not killed) on timeout. This is documented and deliberate, and still usually what you want at a system boundary.
+Sync functions run on a worker thread and are *abandoned* (not killed) on timeout. This is documented and deliberate, and still usually what you want at a system boundary. The worker sees the caller's `contextvars`, and a `TimeoutError` raised by your own code passes through untouched.
 
 ### `rate_limit`: be a good client
 
@@ -150,7 +159,7 @@ Classic AIMD, the scheme TCP uses for congestion control: a 429/503 (or any exce
 def exchange_rates(base): ...
 ```
 
-Fresh values are served from memory; when a refresh *fails*, the expired value is served for up to `stale_ttl` more seconds instead of the error. LRU-bounded, per-arguments keying, injectable clock.
+Fresh values are served from memory; when a refresh *fails*, the expired value is served for up to `stale_ttl` more seconds instead of the error. Refreshes are single-flight: a hundred concurrent misses on one key make one call to the dependency, not a hundred. LRU-bounded, per-arguments keying, injectable clock.
 
 ## Observability: one stream for everything
 
@@ -186,6 +195,13 @@ async def ask(prompt: str) -> str: ...
 
 Reading inside-out: each attempt gets 30s -> outcomes feed the breaker -> transient failures retry with jitter -> anything left becomes a graceful answer.
 
+No function to decorate? Guard a one-off call directly; this works on every policy and on `compose` stacks:
+
+```python
+user = await resilient.acall(client.users.get, user_id)      # async
+rows = payments_breaker.call(db.execute, "SELECT ...")       # sync
+```
+
 ## Recipe: retrying HTTP the right way
 
 Retry transport errors, timeouts, 429 and 5xx; never retry other 4xx (they are permanent, retrying them is just noise):
@@ -218,7 +234,9 @@ def get_json(url):
 ## Roadmap
 
 - OpenTelemetry helper package on top of `events` (spans + metrics)
-- Single-flight deduplication for `cache` refreshes
+- Live metrics snapshots (`breaker.metrics`, bulkhead in-flight count) for health checks
+- Slow-call rate as a breaker trip condition
+- Per-key policies (one breaker or limiter per host or tenant)
 - Trio/AnyIO support
 
 ## Performance
@@ -227,7 +245,7 @@ Resilience must not become its own latency problem. Per-call overhead on the hot
 
 | Policy | Overhead per call |
 | --- | --- |
-| `retry` | ~0.15 us |
+| `retry` | ~0.2 us |
 | `rate_limit` | ~0.6 us |
 | `adaptive_rate_limit` | ~0.9 us |
 | `cache` (fresh hit) | ~0.9 us |

@@ -29,6 +29,12 @@ class CircuitOpen(ResilienceError):
         self.retry_after = retry_after
         super().__init__(f"circuit {name!r} is open; retry in {retry_after:.2f}s")
 
+    def __reduce__(self) -> tuple[type[CircuitOpen], tuple[str, float]]:
+        # The default reduction replays only the formatted message into
+        # __init__, which breaks unpickling (multiprocessing, process pools,
+        # task-queue result backends).
+        return type(self), (self.name, self.retry_after)
+
 
 class BulkheadFull(ResilienceError):
     """Raised when a bulkhead rejects a call because capacity is exhausted."""
@@ -39,4 +45,13 @@ class RateLimited(ResilienceError):
 
     Only raised when ``max_wait`` is set and the required wait exceeds it;
     by default the rate limiter waits instead of failing.
+
+    Attributes:
+        retry_after: Seconds until a token would have been available, i.e.
+            the wait that exceeded ``max_wait`` (None if not provided). An
+            outer ``retry`` honors it like any other ``retry_after`` hint.
     """
+
+    def __init__(self, *args: object, retry_after: float | None = None) -> None:
+        super().__init__(*args)
+        self.retry_after = retry_after

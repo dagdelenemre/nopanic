@@ -73,3 +73,16 @@ def test_validation():
         rate_limit(0)
     with pytest.raises(ValueError):
         rate_limit(1, per=0)
+
+
+def test_rejection_carries_retry_after(clock):
+    limiter = rate_limit(1, per=2.0, max_wait=0, clock=clock)
+
+    @limiter
+    def call():
+        return "ok"
+
+    assert call() == "ok"
+    with pytest.raises(RateLimited) as excinfo:
+        call()
+    assert excinfo.value.retry_after == pytest.approx(2.0)

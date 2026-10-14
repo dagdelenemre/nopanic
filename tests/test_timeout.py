@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 
 import pytest
 
-from nopanic import timeout
+from nopanic import events, timeout
 
 
 def test_fast_sync_call_passes_through():
@@ -76,3 +77,61 @@ def test_async_exception_is_relayed():
 def test_validation():
     with pytest.raises(ValueError):
         timeout(0)
+
+
+class DatabaseTimeout(TimeoutError):
+    pass
+
+
+def test_async_functions_own_timeout_error_is_not_replaced():
+    # On 3.11+ asyncio.TimeoutError IS TimeoutError; the policy must only
+    # replace an expiry of its own, never the callee's exception.
+    seen = []
+    cancel = events.subscribe(seen.append)
+
+    @timeout(5.0)
+    async def query():
+        raise DatabaseTimeout("db took too long")
+
+    try:
+        with pytest.raises(DatabaseTimeout, match="db took too long"):
+            asyncio.run(query())
+    finally:
+        cancel()
+    assert seen == []  # and no false timeout.expired event
+
+
+def test_sync_functions_own_timeout_error_is_not_replaced():
+    @timeout(5.0)
+    def query():
+        raise DatabaseTimeout("db took too long")
+
+    with pytest.raises(DatabaseTimeout):
+        query()
+
+
+request_id = contextvars.ContextVar("request_id", default="missing")
+
+
+def test_sync_worker_sees_the_callers_contextvars():
+    @timeout(1.0)
+    def handler():
+        return request_id.get()
+
+    token = request_id.set("req-42")
+    try:
+        assert handler() == "req-42"
+    finally:
+        request_id.reset(token)
+
+
+def test_async_timeout_runs_in_the_callers_context():
+    @timeout(1.0)
+    async def handler():
+        return request_id.get()
+
+    async def scenario():
+        request_id.set("req-7")
+        return await handler()
+
+    assert asyncio.run(scenario()) == "req-7"

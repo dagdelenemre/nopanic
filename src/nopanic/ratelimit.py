@@ -84,7 +84,8 @@ class rate_limit(Policy):
             self._tokens += 1.0  # refund the reservation
         emit("ratelimit.rejected", "rate_limit", would_wait=wait, max_wait=self.max_wait)
         raise RateLimited(
-            f"rate limit would require waiting {wait:.3f}s (max_wait={self.max_wait})"
+            f"rate limit would require waiting {wait:.3f}s (max_wait={self.max_wait})",
+            retry_after=wait,
         )
 
     def _run_sync(

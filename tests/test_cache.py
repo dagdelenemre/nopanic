@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 import pytest
 
@@ -228,3 +230,93 @@ def test_validation():
         cache(ttl=1.0, stale_ttl=-1)
     with pytest.raises(ValueError):
         cache(ttl=1.0, maxsize=0)
+
+
+def test_single_flight_sync_one_refresh_for_concurrent_misses():
+    c = cache(ttl=60.0)
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    @c
+    def slow(x):
+        calls.append(x)
+        started.set()
+        release.wait(5.0)
+        return x * 10
+
+    results = []
+    leader = threading.Thread(target=lambda: results.append(slow(1)))
+    leader.start()
+    assert started.wait(5.0)
+    followers = [threading.Thread(target=lambda: results.append(slow(1))) for _ in range(7)]
+    for t in followers:
+        t.start()
+    time.sleep(0.05)  # followers are parked on the leader's flight
+    release.set()
+    for t in [leader, *followers]:
+        t.join(5.0)
+    assert calls == [1]
+    assert results == [10] * 8
+
+
+def test_single_flight_async_shares_value_and_errors():
+    c = cache(ttl=60.0)
+    calls = []
+
+    @c
+    async def fetch(x):
+        calls.append(x)
+        await asyncio.sleep(0.01)
+        if x < 0:
+            raise ConnectionError("down")
+        return x
+
+    async def scenario():
+        assert await asyncio.gather(*(fetch(3) for _ in range(10))) == [3] * 10
+        outcomes = await asyncio.gather(*(fetch(-1) for _ in range(5)), return_exceptions=True)
+        assert all(isinstance(o, ConnectionError) for o in outcomes)
+
+    asyncio.run(scenario())
+    assert calls == [3, -1]  # one refresh per key, errors shared too
+
+
+def test_single_flight_cancelled_leader_hands_over():
+    c = cache(ttl=60.0)
+    calls = []
+
+    @c
+    async def fetch():
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return "value"
+
+    async def scenario():
+        leader = asyncio.ensure_future(fetch())
+        await asyncio.sleep(0)
+        follower = asyncio.ensure_future(fetch())
+        await asyncio.sleep(0)
+        leader.cancel()
+        # The follower was not cancelled, so it must not inherit the
+        # leader's cancellation: it refreshes on its own instead.
+        assert await follower == "value"
+
+    asyncio.run(scenario())
+    assert len(calls) == 2
+
+
+def test_single_flight_can_be_disabled():
+    c = cache(ttl=60.0, single_flight=False)
+    calls = []
+
+    @c
+    async def fetch():
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        return "v"
+
+    async def scenario():
+        await asyncio.gather(*(fetch() for _ in range(4)))
+
+    asyncio.run(scenario())
+    assert len(calls) == 4

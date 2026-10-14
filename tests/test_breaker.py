@@ -248,3 +248,51 @@ def test_failure_rate_is_computed_across_buckets(clock):
         with pytest.raises(ConnectionError):
             boom()
     assert breaker.state == "open"
+
+
+class Interrupt(BaseException):
+    """Stands in for KeyboardInterrupt/SystemExit without killing pytest."""
+
+
+def test_cancelled_half_open_probe_releases_its_slot(clock):
+    # Regression: a cancelled probe (hedge loser, outer timeout, client
+    # disconnect) used to keep its slot forever, wedging the breaker
+    # half-open and rejecting every later call.
+    breaker = make_breaker(clock, min_calls=1)
+    trip(breaker, 1)
+    clock.advance(10.0)
+
+    @breaker
+    async def probe(hang):
+        if hang:
+            await asyncio.sleep(10.0)
+        return "ok"
+
+    async def scenario():
+        task = asyncio.ensure_future(probe(True))
+        await asyncio.sleep(0)  # let the probe claim the slot
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return await probe(False)
+
+    assert asyncio.run(scenario()) == "ok"
+    assert breaker.state == "closed"
+
+
+def test_interrupted_sync_probe_releases_its_slot(clock):
+    breaker = make_breaker(clock, min_calls=1)
+    trip(breaker, 1)
+    clock.advance(10.0)
+
+    @breaker
+    def probe(interrupt):
+        if interrupt:
+            raise Interrupt
+        return "ok"
+
+    with pytest.raises(Interrupt):
+        probe(True)
+    assert breaker.state == "half_open"  # no outcome recorded...
+    assert probe(False) == "ok"  # ...but the slot is free again
+    assert breaker.state == "closed"

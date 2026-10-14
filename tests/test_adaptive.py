@@ -4,7 +4,13 @@ import asyncio
 
 import pytest
 
-from nopanic import RateLimited, adaptive_rate_limit, looks_throttled
+from nopanic import (
+    CircuitBreaker,
+    CircuitOpen,
+    RateLimited,
+    adaptive_rate_limit,
+    looks_throttled,
+)
 
 
 class Throttled(Exception):
@@ -166,3 +172,23 @@ def test_validation(clock):
         adaptive_rate_limit(10, min_rate=20.0, clock=clock)
     with pytest.raises(ValueError):
         adaptive_rate_limit(10, max_rate=5.0, clock=clock)
+
+
+def test_local_resilience_signals_are_not_server_pushback(clock):
+    assert not looks_throttled(CircuitOpen("x", 5.0))
+    assert not looks_throttled(RateLimited("local", retry_after=1.0))
+
+    # An open breaker inside the limiter must not collapse the adaptive rate.
+    limiter = adaptive_rate_limit(10, clock=clock)
+    breaker = CircuitBreaker(min_calls=1, reset_timeout=60.0, clock=clock)
+
+    @limiter
+    @breaker
+    def call():
+        raise ConnectionError("down")
+
+    for _ in range(5):
+        clock.advance(1.0)
+        with pytest.raises((ConnectionError, CircuitOpen)):
+            call()
+    assert limiter.current_rate == pytest.approx(10.0)

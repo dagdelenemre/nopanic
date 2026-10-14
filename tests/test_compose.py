@@ -94,3 +94,25 @@ def test_retry_does_not_catch_circuit_open_unless_asked():
     # CircuitOpen, which is not in `on`, so it propagates immediately.
     with pytest.raises(CircuitOpen):
         upstream()
+
+
+def test_composed_stack_call_and_acall():
+    attempts = []
+    stack = compose(
+        fallback("fallback", on=ConnectionError),
+        retry(attempts=2, backoff=0),
+    )
+
+    def always_down():
+        attempts.append(1)
+        raise ConnectionError("down")
+
+    assert stack.call(always_down) == "fallback"
+    assert len(attempts) == 2
+
+    async def fetch(x):
+        return x * 2
+
+    assert asyncio.run(stack.acall(fetch, 21)) == 42
+    # A plain callable returning an awaitable still gets async wrappers.
+    assert asyncio.run(stack.acall(lambda: fetch(5))) == 10

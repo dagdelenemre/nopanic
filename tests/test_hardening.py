@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import pickle
 
 import pytest
 
 from nopanic import (
+    BulkheadFull,
     CircuitBreaker,
+    CircuitOpen,
+    RateLimited,
     backoff,
     bulkhead,
     fallback,
@@ -160,3 +164,30 @@ def test_nan_failure_threshold_cannot_create_never_tripping_breaker():
     with pytest.raises(ValueError):
         CircuitBreaker(failure_threshold=NAN)
     assert math.isnan(NAN)
+
+
+def roundtrip(obj):
+    return pickle.loads(pickle.dumps(obj))  # noqa: S301 (bytes we just made)
+
+
+def test_policy_exceptions_survive_pickling():
+    # Process pools and task-queue result backends pickle exceptions.
+    opened = roundtrip(CircuitOpen("payments", 2.5))
+    assert (opened.name, opened.retry_after) == ("payments", 2.5)
+    assert str(opened) == str(CircuitOpen("payments", 2.5))
+
+    limited = roundtrip(RateLimited("slow down", retry_after=1.5))
+    assert limited.retry_after == 1.5
+    assert limited.args == ("slow down",)
+
+    full = roundtrip(BulkheadFull("full"))
+    assert full.args == ("full",)
+
+
+def test_retry_attempts_must_be_an_int():
+    with pytest.raises(TypeError):
+        retry(attempts=True)
+    with pytest.raises(TypeError):
+        retry(attempts=2.5)
+    with pytest.raises(ValueError):
+        retry(max_time=NAN)

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.3.0 (2026-10-14)
+
+Correctness fixes found in a full review, plus the most requested missing
+pieces. Upgrading is recommended for everyone using `circuit_breaker`
+with async code or `timeout` on Python 3.11+.
+
+Fixes:
+
+- `circuit_breaker`: a half-open probe that was cancelled (a `hedge` loser,
+  an outer timeout, a client that disconnected) or interrupted kept its
+  probe slot forever. The breaker then stayed half-open and rejected every
+  call with `CircuitOpen(retry_after=0)` until `reset()`. Cancellation now
+  releases the slot without recording an outcome.
+- `timeout` (async, Python 3.11+): a `TimeoutError` raised by the wrapped
+  function itself was replaced by the policy's own `TimeoutError` and
+  reported as a `timeout.expired` event, breaking the "no wrapper
+  exceptions" guarantee. Only an expiry of the policy's own deadline is
+  replaced now. The async path also no longer spawns an extra task.
+- `timeout` (sync): the worker thread now runs in a copy of the caller's
+  `contextvars` context, so tracing spans, request IDs and logging context
+  are visible inside the call.
+- `bulkhead` (async, `max_wait > 0`): replaced `asyncio.wait_for` around the
+  semaphore, which on Python 3.10/3.11 could drop a permit acquired at the
+  instant of the timeout and silently shrink the bulkhead for good.
+- `CircuitOpen` could not be unpickled, which broke it across process pools,
+  `multiprocessing` and task-queue result backends.
+- `looks_throttled` no longer treats nopanic's own signals (`CircuitOpen`,
+  `RateLimited`) as server pushback: an adaptive limiter wrapped around a
+  tripped breaker used to collapse its own rate.
+- `retry(attempts=...)` now rejects booleans and non-integers.
+
+New:
+
+- `retry(max_time=...)`: a total time budget. Retrying stops as soon as the
+  next wait would end past the deadline, so no attempt starts late.
+- `retry(on_result=...)`: retry on a rejected return value (an HTTP client
+  that returns a 503 response instead of raising). When retrying stops the
+  last result is returned as-is; no wrapper exception. `RetryAttempt` gains
+  a `result` field, and its `exception` is None for result-triggered
+  retries.
+- `retry(clock=...)` for deterministic `max_time` tests.
+- `policy.call(fn, *args, **kwargs)` and `await policy.acall(fn, ...)` on
+  every policy and on `compose` stacks: guard a one-off call (a third-party
+  SDK method, a lambda) without defining a decorated function. Fully typed
+  via `ParamSpec`.
+- `cache` refreshes are now single-flight (roadmap item): concurrent misses
+  of the same key share one call to the dependency and its outcome instead
+  of stampeding it. On by default; `single_flight=False` restores the old
+  behavior.
+- `RateLimited.retry_after`: the wait that exceeded `max_wait`, so an outer
+  `retry` waits exactly long enough.
+
+Compatibility notes: `compose` is now a class (still a decorator, same
+call signature). Type checkers will see `RetryAttempt.exception` as
+optional.
+
 ## 0.2.1 (2026-07-13)
 
 Performance and memory fix for the circuit breaker, found by load testing.

@@ -304,8 +304,10 @@ class CircuitBreaker(Policy):
             self._fire(events)
 
     def _on_ignored(self, admitted: str) -> None:
-        # An exception not selected by `on`: release the probe slot (if any)
-        # without recording an outcome.
+        # An exception not selected by `on`, or a cancellation: release the
+        # probe slot (if any) without recording an outcome.
+        if admitted != _HALF_OPEN:
+            return
         with self._lock:
             if admitted == _HALF_OPEN and self._state == _HALF_OPEN:
                 self._half_open_inflight -= 1
@@ -324,6 +326,13 @@ class CircuitBreaker(Policy):
             else:
                 self._on_ignored(admitted)
             raise
+        except BaseException:
+            # Cancellation (a hedge loser, an outer timeout, a client that hung
+            # up) or interpreter exit says nothing about the dependency, but a
+            # probe slot this call holds must be returned: otherwise the
+            # breaker stays half-open and rejects every call, forever.
+            self._on_ignored(admitted)
+            raise
         self._on_success(admitted)
         return result
 
@@ -338,6 +347,13 @@ class CircuitBreaker(Policy):
                 self._on_failure(admitted)
             else:
                 self._on_ignored(admitted)
+            raise
+        except BaseException:
+            # Cancellation (a hedge loser, an outer timeout, a client that hung
+            # up) or interpreter exit says nothing about the dependency, but a
+            # probe slot this call holds must be returned: otherwise the
+            # breaker stays half-open and rejects every call, forever.
+            self._on_ignored(admitted)
             raise
         self._on_success(admitted)
         return result

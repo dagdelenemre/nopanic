@@ -12,10 +12,12 @@ import functools
 import inspect
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import Any, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import Any, ParamSpec, TypeVar
 
 F = TypeVar("F", bound=Callable[..., Any])
+P = ParamSpec("P")
+R = TypeVar("R")
 
 # An exception filter: a type, a tuple of types, or a predicate over the
 # raised exception. Used by retry(on=...), fallback(on=...), breaker(on=...).
@@ -54,7 +56,9 @@ class Policy(ABC):
 
     Subclasses implement ``_run_sync`` and ``_run_async``; instances are
     then usable as decorators on both sync and async callables, and can be
-    stacked or combined with :func:`nopanic.compose`.
+    stacked or combined with :func:`nopanic.compose`. For a one-off call
+    there is nothing to decorate: ``policy.call(fn, *args)`` and
+    ``await policy.acall(fn, *args)`` run *fn* under the policy directly.
     """
 
     # Subclasses declare their own __slots__: policies are long-lived shared
@@ -70,6 +74,22 @@ class Policy(ABC):
     async def _run_async(
         self, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any: ...
+
+    def call(self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
+        """Run ``fn(*args, **kwargs)`` under this policy (sync)."""
+        result: R = self._run_sync(fn, args, kwargs)
+        return result
+
+    async def acall(
+        self, fn: Callable[P, Awaitable[R]], /, *args: P.args, **kwargs: P.kwargs
+    ) -> R:
+        """Run and await ``fn(*args, **kwargs)`` under this policy.
+
+        *fn* only needs to return an awaitable: a bound method of an async
+        client or a lambda wrapping one works as well as an ``async def``.
+        """
+        result: R = await self._run_async(fn, args, kwargs)
+        return result
 
     def __call__(self, fn: F) -> F:
         if inspect.iscoroutinefunction(fn):

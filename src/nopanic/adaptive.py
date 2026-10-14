@@ -19,7 +19,7 @@ from typing import Any
 
 from ._core import ExcFilter, Policy, exc_matches, positive_number
 from .events import emit
-from .exceptions import RateLimited
+from .exceptions import RateLimited, ResilienceError
 
 __all__ = ["adaptive_rate_limit", "looks_throttled"]
 
@@ -31,7 +31,14 @@ def looks_throttled(exc: BaseException) -> bool:
     status of 429 or 503 (checked on the exception itself and on an attached
     ``response`` object, which covers requests and httpx errors). Pass your
     own predicate for anything smarter.
+
+    nopanic's own signals (``CircuitOpen``, ``RateLimited``, ...) are never
+    pushback: they carry ``retry_after`` too, but they come from the local
+    process, and reading them as the server's voice would let a tripped
+    breaker collapse the adaptive rate.
     """
+    if isinstance(exc, ResilienceError):
+        return False
     if getattr(exc, "retry_after", None) is not None:
         return True
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
@@ -153,7 +160,8 @@ class adaptive_rate_limit(Policy):
             self._tokens += 1.0  # refund the reservation
         emit("ratelimit.rejected", "adaptive_rate_limit", would_wait=wait, max_wait=self.max_wait)
         raise RateLimited(
-            f"adaptive rate limit would require waiting {wait:.3f}s (max_wait={self.max_wait})"
+            f"adaptive rate limit would require waiting {wait:.3f}s (max_wait={self.max_wait})",
+            retry_after=wait,
         )
 
     def _on_success(self) -> None:

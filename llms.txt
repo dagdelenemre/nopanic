@@ -13,13 +13,14 @@ Imports: `from nopanic import retry, circuit_breaker, CircuitBreaker, timeout, r
 - Stateful policies (`CircuitBreaker`, `bulkhead`, `rate_limit`) hold shared state. Create ONE instance per protected dependency and decorate every call site with that same instance. Never create a fresh instance per call.
 - Every `on=` parameter accepts: an exception type, a tuple of types, or a predicate `Callable[[BaseException], bool]`.
 - All numeric parameters reject NaN, infinity and bool at construction time (ValueError/TypeError).
-- Only `Exception` subclasses are handled; `KeyboardInterrupt` and `asyncio.CancelledError` always propagate.
+- Only `Exception` subclasses are handled; `KeyboardInterrupt` and `asyncio.CancelledError` always propagate (a cancelled breaker probe releases its slot without counting as a failure).
+- Every policy, and every `compose(...)` stack, also guards one-off calls without decorating: `policy.call(fn, *args, **kwargs)` (sync) and `await policy.acall(fn, *args, **kwargs)` (fn only needs to return an awaitable, e.g. a bound method of an async client or a lambda).
 
 ## API reference
 
-### retry(attempts=3, on=Exception, backoff=None, *, giveup=None, before_sleep=None, honor_retry_after=True, retry_after_cap=60.0)
+### retry(attempts=3, on=Exception, backoff=None, *, giveup=None, before_sleep=None, honor_retry_after=True, retry_after_cap=60.0, max_time=None, on_result=None, clock=time.monotonic)
 
-Re-runs the call when it raises an exception matching `on`. `attempts` is the TOTAL number of tries including the first. `backoff` is a plain number (fixed seconds) or a strategy from `nopanic.backoff`; default is `backoff.full_jitter(base=0.1, factor=2.0, cap=30.0)`. `giveup(exc) -> bool` stops retrying even for matching exceptions (use it for permanent errors, e.g. HTTP 4xx except 429). `before_sleep(attempt: RetryAttempt)` runs before each wait; `RetryAttempt` fields: `attempt` (int, 1-based), `exception`, `delay` (seconds). When `honor_retry_after` is True (default) an exception carrying a numeric `retry_after` attribute raises the wait to at least that many seconds plus a small safety margin (5% + 50ms, so the deadline is strictly passed despite OS timer granularity), capped at `retry_after_cap` so a hostile server hint cannot park the client (works with `CircuitOpen` and with exceptions built from HTTP Retry-After headers); disable where fail-fast matters. On exhaustion the last exception is re-raised as-is; there is no RetryError wrapper.
+Re-runs the call when it raises an exception matching `on`. `attempts` is the TOTAL number of tries including the first. `backoff` is a plain number (fixed seconds) or a strategy from `nopanic.backoff`; default is `backoff.full_jitter(base=0.1, factor=2.0, cap=30.0)`. `giveup(exc) -> bool` stops retrying even for matching exceptions (use it for permanent errors, e.g. HTTP 4xx except 429). `before_sleep(attempt: RetryAttempt)` runs before each wait; `RetryAttempt` fields: `attempt` (int, 1-based), `exception`, `delay` (seconds). When `honor_retry_after` is True (default) an exception carrying a numeric `retry_after` attribute raises the wait to at least that many seconds plus a small safety margin (5% + 50ms, so the deadline is strictly passed despite OS timer granularity), capped at `retry_after_cap` so a hostile server hint cannot park the client (works with `CircuitOpen` and with exceptions built from HTTP Retry-After headers); disable where fail-fast matters. `max_time` is a total budget in seconds from the first attempt: retrying stops (original exception re-raised) as soon as the next wait would end past it. `on_result(value) -> bool` retries when a RETURNED value is bad (e.g. a 503 response object); `RetryAttempt.exception` is then None and `RetryAttempt.result` holds the value, and when retrying stops the last result is returned as-is. On exhaustion the last exception is re-raised as-is; there is no RetryError wrapper.
 
 ### nopanic.backoff strategies
 
@@ -35,19 +36,19 @@ Class name `CircuitBreaker`; `circuit_breaker` is an alias. Failure-rate breaker
 
 ### timeout(seconds)
 
-Raises builtin `TimeoutError` when the call exceeds `seconds`. Async: clean cancellation via the event loop. Sync: the call runs on a daemon worker thread which is ABANDONED on timeout (Python cannot kill threads; the work may keep running in the background). Prefer the async path or the callee's native timeout when abandonment matters.
+Raises builtin `TimeoutError` when the call exceeds `seconds`. Async: clean cancellation via the event loop. Sync: the call runs on a daemon worker thread which is ABANDONED on timeout (Python cannot kill threads; the work may keep running in the background). Prefer the async path or the callee's native timeout when abandonment matters. The sync worker runs in a copy of the caller's contextvars. A `TimeoutError` raised by the function itself propagates unchanged; only the policy's own expiry raises a new one.
 
 ### rate_limit(rate, per=1.0, *, burst=None, max_wait=None, clock=time.monotonic)
 
-Token-bucket client-side limiter: `rate` calls per `per` seconds; `burst` is the bucket capacity (default `rate`, must be >= 1). Default behaviour WAITS for a token (roughly FIFO). If `max_wait` is set, a call that would wait longer raises `RateLimited` instead; `max_wait=0` means never wait.
+Token-bucket client-side limiter: `rate` calls per `per` seconds; `burst` is the bucket capacity (default `rate`, must be >= 1). Default behaviour WAITS for a token (roughly FIFO). If `max_wait` is set, a call that would wait longer raises `RateLimited` instead (its `retry_after` is the wait that was refused, honored by an outer `retry`); `max_wait=0` means never wait.
 
 ### adaptive_rate_limit(rate, per=1.0, *, min_rate=None, max_rate=None, increase=0.1, decrease=0.5, throttle_on=looks_throttled, max_wait=None, max_block=60.0, clock=time.monotonic)
 
-AIMD token bucket: on an exception matching `throttle_on` the rate is multiplied by `decrease` (floored at `min_rate`, default `rate/10`); every success adds `increase` (capped at `max_rate`, default `rate`). A numeric `retry_after` on the throttle exception additionally blocks the bucket for that many seconds, capped at `max_block`. Default `throttle_on` is `looks_throttled`: true for exceptions with a `retry_after` attribute, a `status`/`status_code` of 429/503, or a `response.status_code` of 429/503 (covers requests/httpx errors). Throttle exceptions still propagate (pair with `retry` to re-attempt them). Inspect the live rate via `.current_rate` (calls per second). Waiting/`max_wait` semantics as in `rate_limit`.
+AIMD token bucket: on an exception matching `throttle_on` the rate is multiplied by `decrease` (floored at `min_rate`, default `rate/10`); every success adds `increase` (capped at `max_rate`, default `rate`). A numeric `retry_after` on the throttle exception additionally blocks the bucket for that many seconds, capped at `max_block`. Default `throttle_on` is `looks_throttled`: true for exceptions with a `retry_after` attribute, a `status`/`status_code` of 429/503, or a `response.status_code` of 429/503 (covers requests/httpx errors); never for nopanic's own `ResilienceError` signals, which are local, not server pushback. Throttle exceptions still propagate (pair with `retry` to re-attempt them). Inspect the live rate via `.current_rate` (calls per second). Waiting/`max_wait` semantics as in `rate_limit`.
 
-### cache(ttl, *, stale_ttl=0.0, on=Exception, maxsize=1024, key=None, clock=time.monotonic)
+### cache(ttl, *, stale_ttl=0.0, on=Exception, maxsize=1024, key=None, single_flight=True, clock=time.monotonic)
 
-Per-arguments result cache. Fresh entries (age <= ttl) are returned without calling. On refresh FAILURE matching `on`, an expired entry younger than `ttl + stale_ttl` is served instead of the error (stale-while-failing); otherwise the error propagates. LRU eviction at `maxsize`. Arguments must be hashable unless `key(*args, **kwargs) -> hashable` is given; entries are keyed per decorated function, so one instance may decorate several functions. No single-flight: concurrent refreshes of the same key are not deduplicated.
+Per-arguments result cache. Fresh entries (age <= ttl) are returned without calling. On refresh FAILURE matching `on`, an expired entry younger than `ttl + stale_ttl` is served instead of the error (stale-while-failing); otherwise the error propagates. LRU eviction at `maxsize`. Arguments must be hashable unless `key(*args, **kwargs) -> hashable` is given; entries are keyed per decorated function, so one instance may decorate several functions. Single-flight by default: concurrent misses of one key make ONE call and all callers share its outcome (value, stale value or the same exception); a cancelled leader hands over to its followers. Sync and async callers are deduplicated separately (async per event loop). `single_flight=False` disables it.
 
 ### events (module) / subscribe / unsubscribe
 
@@ -67,7 +68,7 @@ If the call has not finished after `delay` seconds, launches a duplicate call; f
 
 ### compose(*policies)
 
-Returns a single decorator; the FIRST argument is the OUTERMOST policy. `compose(a, b, c)` == stacking `@a` over `@b` over `@c`.
+Returns a single decorator; the FIRST argument is the OUTERMOST policy. `compose(a, b, c)` == stacking `@a` over `@b` over `@c`. The result also has `.call(fn, ...)` / `.acall(fn, ...)` for one-off calls (builds the wrapper chain per call; decorate once on hot paths).
 
 ## Composition semantics
 

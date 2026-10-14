@@ -15,6 +15,46 @@ from .exceptions import BulkheadFull
 __all__ = ["bulkhead"]
 
 
+def _release_if_acquired(sem: asyncio.Semaphore) -> Callable[[asyncio.Task[Any]], None]:
+    def callback(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled() and task.exception() is None:
+            sem.release()
+
+    return callback
+
+
+async def _acquire_within(sem: asyncio.Semaphore, seconds: float) -> bool:
+    """Acquire *sem* within *seconds*; never leaks a permit.
+
+    ``asyncio.wait_for(sem.acquire(), ...)`` can lose a permit on Python
+    3.10/3.11: when the acquire completes just as the timeout fires, the
+    result is dropped and the slot is gone for good, silently shrinking the
+    bulkhead. Waiting on a separate task and settling the race explicitly
+    keeps every acquired permit accounted for.
+    """
+    if not sem.locked():
+        await sem.acquire()  # a free slot: completes without yielding
+        return True
+    task = asyncio.ensure_future(sem.acquire())
+    try:
+        await asyncio.wait((task,), timeout=seconds)
+    except BaseException:
+        # We were cancelled while waiting: give back whatever the task gets.
+        if task.done():
+            _release_if_acquired(sem)(task)
+        else:
+            task.cancel()
+            task.add_done_callback(_release_if_acquired(sem))
+        raise
+    if task.done():
+        return True
+    task.cancel()
+    # A permit granted between the timeout and the cancel is released as
+    # soon as the task settles, so the slot returns to the pool.
+    task.add_done_callback(_release_if_acquired(sem))
+    return False
+
+
 class bulkhead(Policy):
     """Allow at most *max_concurrent* simultaneous calls through.
 
@@ -93,11 +133,8 @@ class bulkhead(Policy):
             if sem.locked():
                 raise self._full()
             await sem.acquire()  # value > 0: completes without yielding
-        else:
-            try:
-                await asyncio.wait_for(sem.acquire(), timeout=self.max_wait)
-            except (TimeoutError, asyncio.TimeoutError):
-                raise self._full() from None
+        elif not await _acquire_within(sem, self.max_wait):
+            raise self._full()
         try:
             return await fn(*args, **kwargs)
         finally:

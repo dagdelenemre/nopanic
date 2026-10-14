@@ -17,8 +17,8 @@ attribute read, so the hot path stays effectively free.
 
 Event kinds currently emitted:
 
-- ``retry.attempt_failed``  (attempt, delay, exception)
-- ``retry.gave_up``         (attempt, exception)
+- ``retry.attempt_failed``  (attempt, delay, exception[, result])
+- ``retry.gave_up``         (attempt, exception[, result])
 - ``breaker.state_change``  (old, new)
 - ``breaker.rejected``      (retry_after)
 - ``bulkhead.rejected``     (max_concurrent, max_wait)
